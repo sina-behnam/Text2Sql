@@ -1,0 +1,11 @@
+Data/
+models/
+notebooks/
+venv/
+*.pyc
+__pycache__/
+*.pyo
+.vscode/
+*.ipynb_checkpoints
+*.env
+*.DS_Store
