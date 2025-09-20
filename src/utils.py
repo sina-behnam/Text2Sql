@@ -10,6 +10,68 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from dataclasses import dataclass, asdict
 
+def check_execution_accuracy_2(
+    predicted_sql: str, 
+    ground_truth_sql: str,
+    db_connection: sqlite3.Connection
+) -> Tuple[bool, str]:
+    """
+    Check if predicted SQL executes correctly and produces the same output as ground truth.
+    
+    Returns:
+        - (True, ""): Results match
+        - (False, "error message"): Execution failed with error
+        - (False, ""): Execution succeeded but results don't match (needs semantic check)
+    
+    Args:
+        predicted_sql: Predicted SQL query
+        ground_truth_sql: Ground truth SQL query
+        db_connection: SQLite database connection
+        
+    Returns:
+        Tuple of (is_correct, error_message)
+    """
+    try:
+        # Execute ground truth SQL
+        cursor = db_connection.cursor()
+        cursor.execute(ground_truth_sql)
+        ground_truth_result = cursor.fetchall()
+        
+        try:
+            # Execute predicted SQL
+            cursor.execute(predicted_sql)
+            predicted_result = cursor.fetchall()
+            
+            # Quick check: if results are identical
+            if predicted_result == ground_truth_result:
+                return True, ""
+            
+            # Check if same data but different order (handles column reordering)
+            if len(predicted_result) == len(ground_truth_result):
+                if len(predicted_result) == 0:
+                    return True, ""  # Both empty
+                
+                # Check if same number of columns
+                if predicted_result and len(predicted_result[0]) == len(ground_truth_result[0]):
+                    # Sort values within each row to handle column reordering
+                    pred_sorted_rows = set(tuple(sorted(row)) for row in predicted_result)
+                    gt_sorted_rows = set(tuple(sorted(row)) for row in ground_truth_result)
+                    
+                    if pred_sorted_rows == gt_sorted_rows:
+                        return True, ""
+            
+            # Execution succeeded but results don't match
+            # Return False with EMPTY error message to trigger semantic analysis
+            return False, ""
+                
+        except Exception as e:
+            # Execution failed - return with actual error message
+            return False, f"Execution error: {str(e)}"
+            
+    except Exception as e:
+        # Ground truth execution failed - return with error message  
+        return False, f"Ground truth execution error: {str(e)}"
+
 def check_execution_accuracy(predicted_sql: str, ground_truth_sql: str, 
                                  db_connection: sqlite3.Connection) -> Tuple[bool, str]:
         """

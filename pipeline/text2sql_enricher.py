@@ -27,7 +27,7 @@ from src.models import (
 from src.utils import (extract_sql_query_from_text,
                         check_exact_match,
                         create_sql_prompt,
-                        check_execution_accuracy
+                        check_execution_accuracy_2
                         )
 
 
@@ -206,7 +206,7 @@ class Text2SQLInferencePipeline:
         db_connection, db_type = self.get_db_connection(instance, instance_path)
         
         # Check execution accuracy
-        exec_correct, exec_error = check_execution_accuracy(
+        exec_correct, exec_error = check_execution_accuracy_2(
             generated_sql, instance.sql, db_connection
         )
         
