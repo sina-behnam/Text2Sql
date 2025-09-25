@@ -22,11 +22,11 @@ class DatasetInstance:
     schemas: List[Dict]
     difficulty: str
     dataset: str
-    original_instance_id: str = None
-    evidence: str = None
-    question_analysis: Dict = None
-    sql_analysis: Dict = None
-    inference_results: Dict = None
+    original_instance_id: Optional[str] = None
+    evidence: Optional[str] = None
+    question_analysis: Optional[Dict] = None
+    sql_analysis: Optional[Dict] = None
+    inference_results: Optional[Dict] = None
     
     @classmethod
     def from_json(cls, data: Dict) -> 'DatasetInstance':
