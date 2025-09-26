@@ -76,7 +76,7 @@ class BaseDatasetReader(ABC):
         
         return ddl_map
     
-    def save_schemas_to_csv(self, ddl_statements: Dict[str, str], output_path: str) -> pd.DataFrame:
+    def save_schemas_to_csv(self, ddl_statements: Dict[str, str], descriptions : Dict[str, str], output_path: str) -> pd.DataFrame:
         """Save DDL statements to a CSV file"""
         data = {
             'table_name': [],
@@ -86,7 +86,7 @@ class BaseDatasetReader(ABC):
         
         for table_name, ddl in ddl_statements.items():
             data['table_name'].append(table_name)
-            data['description'].append('')  # Can be filled later
+            data['description'].append(descriptions[table_name] if descriptions != {} else "") # ! Notice: we should technically check if the key exists meaning that if for each table in sqlite has provided description csv file in database_description folder
             data['DDL'].append(ddl)
         
         df = pd.DataFrame(data)

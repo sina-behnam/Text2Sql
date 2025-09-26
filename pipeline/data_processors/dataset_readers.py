@@ -116,8 +116,52 @@ class BIRDDatasetReader(BaseDatasetReader):
         self.instances_file = self.dataset_path / f"{split}.json"
         self.db_dir = self.dataset_path / f"{split}_databases"
         self.schema_dir = self.dataset_path / f"{split}_schemas"
+
+    @staticmethod
+    def generate_table_description(df: pd.DataFrame, table_name) -> str:
+        """Generate a comprehensive table description of BIRD dataset from the DataFrame of database_secription folder
+
+        Note: Not all columns are described if they are self-explanatory or not useful.
+
+        Args:
+            df (pd.DataFrame): DataFrame containing the database description
+            table_name (str): Name of the table/database
+        Returns:
+            str: Formatted table description
+        """
+        table_description = f'The description of columns of the `{table_name}` that require more information are as follows:\n\n'
+
+        for index, row in df.iterrows():
+            original_column_name = row['original_column_name']
+            column_name = row['column_name']
+            column_description = row['column_description']
+            data_format = row['data_format']
+            value_description = row['value_description']
+
+            # checking the type of each field to be string to avoid errors
+            original_column_name = str(original_column_name) if pd.notna(original_column_name) else ''
+            column_name = str(column_name) if pd.notna(column_name) else ''
+            column_description = str(column_description) if pd.notna(column_description) else ''
+            data_format = str(data_format) if pd.notna(data_format) else ''
+            value_description = str(value_description) if pd.notna(value_description) else ''
+
+            desc = ''
+            if column_name != '' and (column_name.lower() != original_column_name.lower()) and (column_name.lower() != column_description.lower()):
+                desc = f"- {original_column_name} (also known as {column_name}) {': ' + column_description}"
+            elif column_description != '' and (column_description.lower() != original_column_name.lower()):
+                desc = f"- {original_column_name} : {column_description}"
+
+            if value_description != '' and value_description != 'not useful' and value_description.lower() != column_description.lower():
+                if desc == '':
+                    desc = f"- {original_column_name}"
+                desc += f": Where it means that the value is about : [{value_description}]"
+
+            if desc != '':
+                table_description += desc + '\n'
+
+        return table_description
     
-    def process_schemas(self, with_description: bool = False):
+    def process_schemas(self, with_description: bool = True):
         """Process database schemas and save them to CSV files"""
         if not self.schema_dir.exists():
             self.schema_dir.mkdir(parents=True)
@@ -126,12 +170,29 @@ class BIRDDatasetReader(BaseDatasetReader):
         
         for db_file in db_files:
             db_name = Path(db_file).stem
+
+            descriptions = {}
+            if with_description:
+                # Process table descriptions
+                db_secription_path = self.db_dir / db_name / "database_description"  
+                csv_files = glob.glob(str(db_secription_path / "*.csv"))
+                for csv_file in csv_files:
+                    table_name = Path(csv_file).stem
+                    try:
+                        df = pd.read_csv(csv_file)
+                        table_desc = BIRDDatasetReader.generate_table_description(df, table_name)
+                        descriptions[table_name] = table_desc
+                    except Exception as e:
+                        logger.error(f"Failed to process description for table {table_name} in database {db_name}: {e}")
+                        descriptions[table_name] = ""
+                        continue;
+            
             output_dir = self.schema_dir / db_name
             output_dir.mkdir(exist_ok=True)
             output_path = output_dir / f"{db_name}.csv"
             
             ddl_statements = self.generate_ddl_from_sqlite(db_file)
-            self.save_schemas_to_csv(ddl_statements, str(output_path))
+            self.save_schemas_to_csv(ddl_statements,descriptions,str(output_path))
             logger.info(f"Processed {db_name} and saved to {output_path}")
     
     def get_database_info(self, instance: Dict) -> Dict[str, Any]:
@@ -167,9 +228,9 @@ class BIRDDatasetReader(BaseDatasetReader):
     def load_instances(self, limit: Optional[int] = None) -> List[StandardizedInstance]:
         """Load and standardize BIRD instances"""
         # Process schemas if needed
-        if not self.schema_dir.exists():
-            logger.info(f"Processing schemas for {self.split} split...")
-            self.process_schemas()
+        # if not self.schema_dir.exists():
+        logger.info(f"Processing schemas for {self.split} split...")
+        self.process_schemas()
         
         # Load instances
         with open(self.instances_file, 'r') as f:
