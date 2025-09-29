@@ -91,10 +91,8 @@ class DatasetInstance:
 
         # Handle schemas
         if include_schemas and self.schemas:
-            # Count schemas and include basic info
+            row['schemas'] = [self.schemas]
             row['num_schemas'] = len(self.schemas)
-            row['schema_tables'] = json.dumps([schema.get('table_name') for schema in self.schemas])
-            row['schemas_full'] = json.dumps(self.schemas)
         else:
             row['num_schemas'] = len(self.schemas) if self.schemas else 0
     
