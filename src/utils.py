@@ -6,7 +6,7 @@ import pandas as pd
 import csv
 import logging
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, Union
 from pathlib import Path
 from dataclasses import dataclass, asdict
 
@@ -293,3 +293,41 @@ def read_json_file(file_path: str):
                 if line.strip():
                     data.append(json.loads(line))
             return data
+        
+def get_spacy_models():
+    '''
+    It list out all installed spaCy models with details.
+    '''
+    import spacy
+    import spacy.util
+
+    # Get installed models with more details
+    models = spacy.util.get_installed_models()
+    for model_name in models:
+        try:
+            nlp = spacy.load(model_name)
+            print(f"Model: {model_name}")
+            print(f"Language: {nlp.lang}")
+            print(f"Pipeline: {nlp.pipe_names}")
+            print("---")
+        except Exception as e:
+            print(f"Could not load {model_name}: {e}")
+
+def num_tokens(text: str, model : str) -> int:
+    """
+    Estimate number of tokens by using spacy tokenizer.
+    
+    Args:
+        text: Input text string
+    Returns:
+        Estimated number of tokens
+    """
+    import spacy
+
+    try:
+        nlp = spacy.load(model)
+    except Exception as e:
+        raise ValueError(f"Could not load spaCy model '{model}': {e}")
+    
+    doc = nlp(text)
+    return len(doc)
