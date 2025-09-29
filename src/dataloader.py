@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
+import pandas as pd
 
 
 # Configure logging
@@ -29,7 +30,7 @@ class DatasetInstance:
     inference_results: Optional[Dict] = None
     
     @classmethod
-    def from_json(cls, data: Dict) -> 'DatasetInstance':
+    def from_dict(cls, data: Dict) -> 'DatasetInstance':
         """Create instance from JSON data"""
         return cls(
             id=data['id'],
@@ -49,6 +50,102 @@ class DatasetInstance:
     def to_dict(self) -> Dict:
         """Convert instance to dictionary"""
         return asdict(self)
+    
+    def to_dataframe(self,flatten_nested: bool = True, 
+                         include_schemas: bool = False,
+                         include_analysis: bool = True) -> pd.DataFrame:
+        """
+        Convert DatasetInstance(s) to pandas DataFrame.
+
+        Args:
+            instance: Single DatasetInstance
+            flatten_nested: Whether to flatten nested dictionaries (database info, etc.)
+            include_schemas: Whether to include schema information (can make DataFrame very wide)
+            include_analysis: Whether to include question_analysis and sql_analysis
+
+        Returns:
+            pandas DataFrame with instance data
+        """
+    
+    
+        # Start with basic fields
+        row = {
+            'id': self.id,
+            'question': self.question,
+            'sql': self.sql,
+            'difficulty': self.difficulty,
+            'dataset': self.dataset,
+            'original_instance_id': self.original_instance_id,
+            'evidence': self.evidence
+        }
+        
+        # Handle database information
+        if flatten_nested and self.database:
+            row['database_name'] = self.database.get('name')
+            row['database_type'] = self.database.get('type')
+            # Convert path list to string
+            if 'path' in self.database:
+                row['database_path'] = json.dumps(self.database['path']) if isinstance(self.database['path'], list) else self.database['path']
+        else:
+            row['database'] = json.dumps(self.database) if self.database else None
+
+        # Handle schemas
+        if include_schemas and self.schemas:
+            # Count schemas and include basic info
+            row['num_schemas'] = len(self.schemas)
+            row['schema_tables'] = json.dumps([schema.get('table_name') for schema in self.schemas])
+            row['schemas_full'] = json.dumps(self.schemas)
+        else:
+            row['num_schemas'] = len(self.schemas) if self.schemas else 0
+    
+        # Handle analysis data
+        if include_analysis:
+            # Question analysis
+            if self.question_analysis:
+                qa = self.question_analysis
+                row['question_char_length'] = qa.get('char_length')
+                row['question_word_length'] = qa.get('word_length')
+                row['question_has_entities'] = qa.get('has_entities', False)
+                row['question_has_numbers'] = qa.get('has_numbers', False)
+                row['question_has_negation'] = qa.get('has_negation', False)
+                row['question_has_superlatives'] = qa.get('has_superlatives', False)
+                row['question_entity_types'] = json.dumps(qa.get('entity_types', []))
+                row['question_numbers'] = json.dumps(qa.get('numbers', []))
+
+            # SQL analysis
+            if self.sql_analysis:
+                sa = self.sql_analysis
+                row['sql_char_length'] = sa.get('char_length')
+                row['sql_tables_count'] = sa.get('tables_count')
+                row['sql_join_count'] = sa.get('join_count')
+                row['sql_where_conditions'] = sa.get('where_conditions')
+                row['sql_subquery_count'] = sa.get('subquery_count')
+                row['sql_aggregation_function_count'] = sa.get('aggregation_function_count')
+                row['sql_tables'] = json.dumps(sa.get('tables', []))
+                row['sql_aggregation_functions'] = json.dumps(sa.get('aggregation_functions', []))
+
+        # Handle inference results
+        if self.inference_results:
+            ir = self.inference_results
+            row['has_prediction'] = ir.get('has_prediction', False)
+
+            if 'model' in ir:
+                model_info = ir['model']
+                row['model_name'] = model_info.get('model_name')
+                row['model_type'] = model_info.get('model_type')
+                row['model_timestamp'] = model_info.get('timestamp')
+
+            if 'predicted_output' in ir:
+                po = ir['predicted_output']
+                row['generated_sql'] = po.get('generated_sql')
+                row['execution_correct'] = po.get('execution_correct')
+                row['exact_match'] = po.get('exact_match')
+                row['semantic_equivalent'] = po.get('semantic_equivalent')
+                row['execution_error'] = po.get('execution_error')
+                row['semantic_explanation'] = po.get('semantic_explanation')
+    
+    
+        return pd.DataFrame(row, index=[0])
 
 class DatasetLoader:
     """Handles loading and processing of the Text2SQL datasets"""
@@ -69,7 +166,7 @@ class DatasetLoader:
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    instance = DatasetInstance.from_json(data)
+                    instance = DatasetInstance.from_dict(data)
                     instances_with_paths.append((instance, str(file_path)))
                     logger.debug(f"Loaded instance {instance.id} from {file_path.name}")
             except Exception as e:
