@@ -86,7 +86,7 @@ class Text2SQLInferencePipeline:
             extended_thinking = self.model_config.get("extended_thinking", False)
             self.model_provider = AnthropicProvider(model_name, api_key, max_tokens, extended_thinking)
         else:
-            raise ValueError(f"Unsupported model type: {model_type}")
+            raise ValueError(f"Unsupported model type: {model_type}. The available options are 'together_ai', 'openai', 'local', and 'anthropic'.")
         
         # Store model info for later use
         self.model_info = {
