@@ -14,7 +14,7 @@ WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-    python3.12.3 \
+    python3.10 \
     python3-pip \
     git \
     wget \
@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y \
 RUN pip3 install --upgrade pip setuptools wheel
 
 # Copy requirements file
-COPY requirements.txt /app/requirements.txt
+COPY requirements-docker.txt /app/requirements.txt
 
 # Install Python dependencies
 # Install PyTorch with CUDA 11.8 support first
