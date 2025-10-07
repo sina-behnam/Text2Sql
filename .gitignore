@@ -1,7 +1,6 @@
 Data/
 local_models/
-notebooks/datasets/
-notebooks/pipeline/test.ipynb
+notebooks/
 *.lock
 *.csv
 *.sqlite3
