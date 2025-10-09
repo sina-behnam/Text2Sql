@@ -27,21 +27,20 @@ class SpiderDatasetReader(BaseDatasetReader):
         self.schema_dir = self.dataset_path / f"{split}_schemas"
         
     def process_schemas(self, with_description: bool = False):
-        """Process database schemas and save them to CSV files"""
+        """Process database schemas"""
         if not self.schema_dir.exists():
             self.schema_dir.mkdir(parents=True)
         
         db_files = glob.glob(str(self.db_dir / "**/*.sqlite"), recursive=True)
-        
+        schemas = {}
         for db_file in db_files:
             db_name = Path(db_file).stem
-            output_dir = self.schema_dir / db_name
-            output_dir.mkdir(exist_ok=True)
-            output_path = output_dir / f"{db_name}.csv"
             
             ddl_statements = self.generate_ddl_from_sqlite(db_file)
-            self.save_schemas_to_csv(ddl_statements, str(output_path))
-            logger.info(f"Processed {db_name} and saved to {output_path}")
+            schemas[db_name] = self.shape_schema(ddl_statements, descriptions={}) # ! No descriptions in Spider dataset
+
+        return schemas
+
     
     def get_database_info(self, instance: Dict) -> Dict[str, Any]:
         """Extract database information from Spider instance"""
@@ -57,26 +56,12 @@ class SpiderDatasetReader(BaseDatasetReader):
             'type': 'sqlite'
         }
     
-    def get_schema_info(self, instance: Dict) -> List[Dict[str, Any]]:
-        """Extract schema information from Spider instance"""
-        db_name = instance.get('db_id')
-        schema_files = glob.glob(str(self.schema_dir / db_name / "*.csv"))
-        
-        if not schema_files:
-            raise FileNotFoundError(f"No schema files found for database {db_name}")
-        
-        return [{
-            'name': db_name,
-            'path': schema_files,
-            'type': 'csv'
-        }]
-    
     def load_instances(self, limit: Optional[int] = None) -> List[StandardizedInstance]:
         """Load and standardize Spider instances"""
         # Process schemas if needed
-        if not self.schema_dir.exists():
-            logger.info(f"Processing schemas for {self.split} split...")
-            self.process_schemas()
+        # if not self.schema_dir.exists():
+        logger.info(f"Processing schemas for {self.split} split...")
+        schemas = self.process_schemas()
         
         # Load instances
         with open(self.instances_file, 'r') as f:
@@ -95,7 +80,7 @@ class SpiderDatasetReader(BaseDatasetReader):
                     question=instance['question'],
                     sql=instance['query'],
                     database=self.get_database_info(instance),
-                    schemas=self.get_schema_info(instance),
+                    schemas=self.get_schemas(schemas,instance),
                     difficulty=self.calculate_difficulty(instance['query']),
                     evidence=''
                 )
@@ -167,7 +152,7 @@ class BIRDDatasetReader(BaseDatasetReader):
             self.schema_dir.mkdir(parents=True)
         
         db_files = glob.glob(str(self.db_dir / "**/*.sqlite"), recursive=True)
-        
+        schemas = {}
         for db_file in db_files:
             db_name = Path(db_file).stem
 
@@ -182,18 +167,19 @@ class BIRDDatasetReader(BaseDatasetReader):
                         df = pd.read_csv(csv_file)
                         table_desc = BIRDDatasetReader.generate_table_description(df, table_name)
                         descriptions[table_name] = table_desc
+                    except UnicodeDecodeError as e:
+                        df = pd.read_csv(csv_file, encoding='latin1')
+                        table_desc = BIRDDatasetReader.generate_table_description(df, table_name)
+                        descriptions[table_name] = table_desc
                     except Exception as e:
                         logger.error(f"Failed to process description for table {table_name} in database {db_name}: {e}")
                         descriptions[table_name] = ""
                         continue;
-            
-            output_dir = self.schema_dir / db_name
-            output_dir.mkdir(exist_ok=True)
-            output_path = output_dir / f"{db_name}.csv"
-            
+                    
             ddl_statements = self.generate_ddl_from_sqlite(db_file)
-            self.save_schemas_to_csv(ddl_statements,descriptions,str(output_path))
-            logger.info(f"Processed {db_name} and saved to {output_path}")
+            schemas[db_name] = self.shape_schema(ddl_statements, descriptions)
+
+        return schemas
     
     def get_database_info(self, instance: Dict) -> Dict[str, Any]:
         """Extract database information from BIRD instance"""
@@ -211,26 +197,12 @@ class BIRDDatasetReader(BaseDatasetReader):
             'type': 'sqlite'
         }
     
-    def get_schema_info(self, instance: Dict) -> List[Dict[str, Any]]:
-        """Extract schema information from BIRD instance"""
-        db_name = instance.get('db_id')
-        schema_files = glob.glob(str(self.schema_dir / db_name / "*.csv"))
-        
-        if not schema_files:
-            raise FileNotFoundError(f"No schema files found for database {db_name}")
-        
-        return [{
-            'name': db_name,
-            'path': schema_files,
-            'type': 'csv'
-        }]
-    
     def load_instances(self, limit: Optional[int] = None) -> List[StandardizedInstance]:
         """Load and standardize BIRD instances"""
         # Process schemas if needed
         # if not self.schema_dir.exists():
         logger.info(f"Processing schemas for {self.split} split...")
-        self.process_schemas()
+        schemas = self.process_schemas()
         
         # Load instances
         with open(self.instances_file, 'r') as f:
@@ -250,7 +222,7 @@ class BIRDDatasetReader(BaseDatasetReader):
                     question=instance['question'],
                     sql=instance['SQL'],
                     database=self.get_database_info(instance),
-                    schemas=self.get_schema_info(instance),
+                    schemas=self.get_schemas(schemas,instance),
                     difficulty=instance.get('difficulty', 'moderate'),
                     evidence=instance.get('evidence', '')
                 )

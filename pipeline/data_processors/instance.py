@@ -13,7 +13,7 @@ class StandardizedInstance:
     question: str
     sql: str
     database: Dict[str, Any]
-    schemas: List[Dict[str, Any]]
+    schemas: List[Dict]
     difficulty: str
     original_instance_id: Optional[str] = None
     evidence: Optional[str] = None

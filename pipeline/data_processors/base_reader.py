@@ -39,10 +39,15 @@ class BaseDatasetReader(ABC):
         """Extract database information from instance"""
         pass
     
-    @abstractmethod
-    def get_schema_info(self, instance: Dict) -> List[Dict[str, Any]]:
+    # @abstractmethod
+    def get_schemas(self, schemas : Dict,instance: Dict) -> List[Dict]:
         """Extract schema information from instance"""
-        pass
+        db_name = instance.get('db_id')
+        if db_name in schemas:
+            return schemas[db_name]
+        else:
+            # logger.warning(f"No schema found for database {db_name}")
+            return []
     
     def generate_ddl_from_sqlite(self, sqlite_file: str) -> Dict[str, str]:
         """
@@ -75,6 +80,19 @@ class BaseDatasetReader(ABC):
         conn.close()
         
         return ddl_map
+    
+    def shape_schema(self, ddl_statements: Dict[str, str], descriptions : Dict[str, str]) -> List[Dict]:
+        """Shape schema information from DDL statements and descriptions"""
+        schema_info = []
+        
+        for table_name, ddl in ddl_statements.items():
+            schema_info.append({
+                'table_name': table_name,
+                'description': descriptions.get(table_name, "") if descriptions != {} else "", # ! Notice: we should technically check if the key exists meaning that if for each table in sqlite has provided description csv file in database_description folder
+                'DDL': ddl
+            })
+        
+        return schema_info
     
     def save_schemas_to_csv(self, ddl_statements: Dict[str, str], descriptions : Dict[str, str], output_path: str) -> pd.DataFrame:
         """Save DDL statements to a CSV file"""
