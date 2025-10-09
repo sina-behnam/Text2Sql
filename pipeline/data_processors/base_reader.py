@@ -39,15 +39,10 @@ class BaseDatasetReader(ABC):
         """Extract database information from instance"""
         pass
     
-    # @abstractmethod
+    @abstractmethod
     def get_schemas(self, schemas : Dict,instance: Dict) -> List[Dict]:
         """Extract schema information from instance"""
-        db_name = instance.get('db_id')
-        if db_name in schemas:
-            return schemas[db_name]
-        else:
-            # logger.warning(f"No schema found for database {db_name}")
-            return []
+        pass
     
     def generate_ddl_from_sqlite(self, sqlite_file: str) -> Dict[str, str]:
         """

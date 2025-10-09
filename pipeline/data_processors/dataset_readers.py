@@ -9,6 +9,7 @@ import logging
 import pandas as pd
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
+from dataclasses import dataclass, asdict
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -40,8 +41,7 @@ class SpiderDatasetReader(BaseDatasetReader):
             schemas[db_name] = self.shape_schema(ddl_statements, descriptions={}) # ! No descriptions in Spider dataset
 
         return schemas
-
-    
+ 
     def get_database_info(self, instance: Dict) -> Dict[str, Any]:
         """Extract database information from Spider instance"""
         db_name = instance.get('db_id')
@@ -55,6 +55,14 @@ class SpiderDatasetReader(BaseDatasetReader):
             'path': db_path,
             'type': 'sqlite'
         }
+
+    def get_schemas(self, schemas, instance):
+        db_name = instance.get('db_id')
+        if db_name in schemas:
+            return schemas[db_name]
+        else:
+            logger.warning(f"For Spider, No schema found for database {db_name}")
+            return []
     
     def load_instances(self, limit: Optional[int] = None) -> List[StandardizedInstance]:
         """Load and standardize Spider instances"""
@@ -196,6 +204,14 @@ class BIRDDatasetReader(BaseDatasetReader):
             'csv_files': csv_files,
             'type': 'sqlite'
         }
+
+    def get_schemas(self, schemas, instance):
+        db_name = instance.get('db_id')
+        if db_name in schemas:
+            return schemas[db_name]
+        else:
+            logger.warning(f"For Bird, No schema found for database {db_name}")
+            return []
     
     def load_instances(self, limit: Optional[int] = None) -> List[StandardizedInstance]:
         """Load and standardize BIRD instances"""
@@ -237,7 +253,16 @@ class BIRDDatasetReader(BaseDatasetReader):
 
 class Spider2DatasetReader(BaseDatasetReader):
     """Reader for Spider2-lite dataset"""
-    
+
+    @dataclass
+    class Spider2SchemaStruct:
+        db_name : str
+        schema_name : str
+        table_name : str
+        DDL : str
+        type : str
+        description : str = ''
+
     def __init__(self, dataset_path: str, dataset_type: str = 'lite'):
         super().__init__(dataset_path, 'dev')
         self.dataset_type = dataset_type
@@ -250,28 +275,56 @@ class Spider2DatasetReader(BaseDatasetReader):
     
     def _load_schema_paths(self) -> pd.DataFrame:
         """Load schema paths for different database types"""
-        schema_paths = {}
+        
         db_base = self.base_path / "resource" / "databases"
         
         for db_type in ['snowflake', 'sqlite', 'bigquery']:
             db_type_dir = db_base / db_type
             if db_type_dir.exists():
-                schema_paths[db_type] = self._get_schemas_for_type(db_type_dir)
+                csv_files = glob.glob(str(db_type_dir / "**/*.csv"), recursive=True)
+                json_files = glob.glob(str(db_type_dir / "**/*.json"), recursive=True)
+                
+                schema_files = {}
+                for csv_file in csv_files:
+                    if csv_file not in schema_files:
+                        schema_files[csv_file] = []
+                    for json_file in json_files:
+                        if Path(csv_file).parent == Path(json_file).parent:
+                            schema_files[csv_file].append(json_file)
+
+                for csv_file, json_list in schema_files.items():
+                    db_name = Path(csv_file).relative_to(db_type_dir).parts[0]
+                    ddl_statements = pd.read_csv(csv_file).to_string(index=False)
+                    for json_file in json_list:
+                        table_name = Path(json_file).stem
+
+                        schema_struct = Spider2DatasetReader.Spider2SchemaStruct(
+                            db_name=db_name,
+                            schema_name=Path(csv_file).parts[-2],
+                            table_name=table_name,
+                            DDL=ddl_statements,
+                            type=db_type,
+                            description=''
+                        )
+
+
         
-        return pd.DataFrame.from_dict(schema_paths, orient='index').T
+        
     
     def _get_schemas_for_type(self, db_type_dir: Path) -> Dict[str, List[str]]:
         """Get schema files for a specific database type"""
         schemas = {}
-        csv_files = glob.glob(str(db_type_dir / "**/*.csv"), recursive=True)
+        files = glob.glob(str(db_type_dir / "**/*.csv"), recursive=True)
+        json_files = glob.glob(str(db_type_dir / "**/*.json"), recursive=True)
+        files.extend(json_files)
         
-        for csv_file in csv_files:
-            parts = Path(csv_file).relative_to(db_type_dir).parts
+        for f in files:
+            parts = Path(f).relative_to(db_type_dir).parts
             if parts:
                 db_name = parts[0]
                 if db_name not in schemas:
                     schemas[db_name] = []
-                schemas[db_name].append(csv_file)
+                schemas[db_name].append(f)
         
         return schemas
     
@@ -335,7 +388,7 @@ class Spider2DatasetReader(BaseDatasetReader):
         
         return None
     
-    def get_schema_info(self, instance: Dict) -> List[Dict[str, Any]]:
+    def get_schemas(self, schemas : Dict,instance: Dict) -> List[Dict]:
         """Extract schema information from Spider2 instance"""
         db_name = instance.get('db')
         if not db_name or db_name not in self.db_schemas.index:
@@ -345,7 +398,7 @@ class Spider2DatasetReader(BaseDatasetReader):
         if not db_info:
             return []
         
-        schemas = []
+        schemas = {}
         for db_type, schema_files in db_info.items():
             for schema_file in schema_files:
                 schema_name = Path(schema_file).parts[-2]
@@ -355,7 +408,7 @@ class Spider2DatasetReader(BaseDatasetReader):
                 })
         
         return schemas
-    
+
     def load_instances(self, limit: Optional[int] = None) -> List[StandardizedInstance]:
         """Load and standardize Spider2 instances"""
         # Load instances
