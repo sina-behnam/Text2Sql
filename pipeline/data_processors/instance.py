@@ -17,6 +17,9 @@ class StandardizedInstance:
     difficulty: str
     original_instance_id: Optional[str] = None
     evidence: Optional[str] = None
+    question_analysis: Optional[Dict] = None
+    sql_analysis: Optional[Dict] = None
+    schema_analysis: Optional[Dict] = None
     
     def to_dict(self) -> Dict:
         """Convert to dictionary"""
