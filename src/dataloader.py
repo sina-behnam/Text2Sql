@@ -53,7 +53,9 @@ class DatasetInstance:
     
     def to_dataframe(self,flatten_nested: bool = True, 
                          include_schemas: bool = False,
-                         include_analysis: bool = True) -> pd.DataFrame:
+                         include_analysis: bool = True,
+                         include_inference: bool = True
+                         ) -> pd.DataFrame:
         """
         Convert DatasetInstance(s) to pandas DataFrame.
 
@@ -123,7 +125,7 @@ class DatasetInstance:
                 row['sql_aggregation_functions'] = json.dumps(sa.get('aggregation_functions', []))
 
         # Handle inference results
-        if self.inference_results:
+        if include_inference and self.inference_results:
             ir = self.inference_results
             row['has_prediction'] = ir.get('has_prediction', False)
 
