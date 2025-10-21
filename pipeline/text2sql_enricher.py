@@ -24,11 +24,12 @@ from src.models import (
                     LocalHuggingFaceProvider,
                     AnthropicProvider)
 
-from src.utils import (extract_sql_query_from_text,
+from src.utils import (
                         check_exact_match,
-                        create_sql_prompt,
                         check_execution_accuracy_2
                         )
+
+from utils.prompt_engineering import get_prompt_template
 
 
 class Text2SQLInferencePipeline:
@@ -71,6 +72,13 @@ class Text2SQLInferencePipeline:
 
         # Initialize the model provider based on config
         self._init_model_provider()
+
+        # Initialize the prompt template based on model name
+        self.prompt_template = get_prompt_template(
+            model_name=self.model_info['model_name'],
+            model_type=self.model_info['model_type']
+        )
+        self.logger.info(f"Using prompt template: {self.prompt_template.__class__.__name__}")
 
     def _init_model_provider(self):
         """Initialize the model provider based on the configuration"""
@@ -286,13 +294,11 @@ class Text2SQLInferencePipeline:
             evidence = instance.evidence
 
             # Generate SQL query
-            # Get the prompt messages with model-specific formatting
-            system_message, user_message = create_sql_prompt(
+            # Get the prompt messages using the prompt template
+            system_message, user_message = self.prompt_template.create_prompt(
                 question=question,
                 schema=schema,
                 evidence=evidence,
-                model_type=self.model_info['model_type'],
-                model_name=self.model_info['model_name'],
                 few_shot_examples=self.few_shot_examples
             )
 
@@ -327,9 +333,9 @@ class Text2SQLInferencePipeline:
                 self.logger.info("Failed to generate SQL from model response")
                 continue
 
-            
-            # Extract SQL query from the raw response using the enhanced function
-            generated_sql = extract_sql_query_from_text(raw_response)
+
+            # Extract SQL query from the raw response using the prompt template
+            generated_sql = self.prompt_template.extract_sql(raw_response)
             
             if generated_sql:
                 # Evaluate the generated SQL
