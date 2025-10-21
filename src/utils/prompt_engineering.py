@@ -95,28 +95,6 @@ class BasePromptTemplate(ABC):
         """
         pass
 
-    def _build_few_shot_examples(self, examples: Optional[List[Dict]]) -> str:
-        """
-        Helper method to format few-shot examples.
-
-        Args:
-            examples: List of example dicts with 'question', 'schema', 'sql' keys
-
-        Returns:
-            Formatted examples string
-        """
-        if not examples:
-            return ""
-
-        examples_text = "\n\nHere are some examples:\n\n"
-        for i, example in enumerate(examples, 1):
-            examples_text += f"Example {i}:\n"
-            examples_text += f"Question: {example.get('question', '')}\n"
-            examples_text += f"Schema: {example.get('schema', '')}\n"
-            examples_text += f"SQL: {example.get('sql', '')}\n\n"
-
-        return examples_text
-
     @staticmethod
     def _is_valid_sql(text: str) -> bool:
         """
@@ -166,13 +144,13 @@ class BasePromptTemplate(ABC):
             return ""
 
         # Remove SQL comments (-- style)
-        sql = re.sub(r'--[^\n]*', '', sql)
+        # sql = re.sub(r'--[^\n]*', '', sql) # for example : SELECT * FROM table -- this is a comment # ! It is better to keep inline comments for clarity, FOR NOW
 
         # Remove SQL comments (/* */ style)
-        sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
+        # sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL) # for example : SELECT /* comment */ * FROM table # ! It is better to keep inline comments for clarity, FOR NOW
 
         # Remove extra whitespace
-        sql = re.sub(r'\s+', ' ', sql)
+        sql = re.sub(r'\s+', ' ', sql) 
 
         # Remove leading/trailing whitespace
         sql = sql.strip()
@@ -194,7 +172,7 @@ class DefaultPromptTemplate(BasePromptTemplate):
         question: str,
         schema: str,
         evidence: Optional[str] = None,
-        few_shot_examples: Optional[List[Dict]] = None
+        dialect: str = "SQL",
     ) -> Tuple[str, str]:
         """Create a default prompt."""
         # Combine question with evidence
@@ -203,18 +181,30 @@ class DefaultPromptTemplate(BasePromptTemplate):
             full_question = f"{question}\n\nAdditional Context: {evidence}"
 
         system_message = (
-            "You are a database expert. "
-            "Generate a SQL query based on the user's question and the provided database schema. "
-            "Your response must be in JSON format with a field named 'sql' containing the generated SQL query. "
-            "Example response format: {\"sql\": \"SELECT * FROM table WHERE condition\"}"
+            """
+            You are a database expert generating SQL queries from natural language. 
+
+                SCHEMA FORMAT:
+                Each table is a dictionary with:
+                - table_name: string
+                - description: string (it can be empty)
+                - ddl: CREATE TABLE statement (string)
+            
+                REQUIREMENTS:
+                1. Generate valid SQL for the specified dialect (provide dialect in context)
+                2. Return JSON: {"sql": "query_string", "explanation": "brief rationale"}
+
+                EXAMPLE RESPONSE:
+                {
+                    "sql": "SELECT name FROM employees WHERE age > 30",
+                    "explanation": "Selects names of employees older than 30"
+                }
+            """
         )
 
-        examples_text = self._build_few_shot_examples(few_shot_examples)
-
         user_message = (
-            f"{examples_text}"
             f"{full_question}\n\n"
-            f"Database schema:\n```\n{schema}\n```"
+            f"Database schema (with {dialect} dialect ) :\n```\n{schema}\n```"
         )
 
         return system_message, user_message
@@ -240,30 +230,16 @@ class DefaultPromptTemplate(BasePromptTemplate):
         # Step 1: Remove thinking tags
         text = self._remove_thinking_tags(text)
 
-        # Step 2: Try JSON extraction
-        sql = self._try_json_extraction(text)
-        if sql and self._is_valid_sql(sql):
-            return self._clean_sql(sql) if clean else sql
-
-        # Step 3: Try code blocks
-        sql = self._try_code_block_extraction(text)
-        if sql and self._is_valid_sql(sql):
-            return self._clean_sql(sql) if clean else sql
-
-        # Step 4: Try XML tags
-        sql = self._try_xml_extraction(text)
-        if sql and self._is_valid_sql(sql):
-            return self._clean_sql(sql) if clean else sql
-
-        # Step 5: Try introductory phrases
-        sql = self._try_intro_phrase_extraction(text)
-        if sql and self._is_valid_sql(sql):
-            return self._clean_sql(sql) if clean else sql
-
-        # Step 6: Direct SQL pattern matching
-        sql = self._try_direct_sql_extraction(text)
-        if sql and self._is_valid_sql(sql):
-            return self._clean_sql(sql) if clean else sql
+        sql_function_set = [self._try_json_extraction, 
+                            self._try_code_block_extraction,
+                            self._try_xml_extraction,
+                            self._try_intro_phrase_extraction,
+                            self._try_direct_sql_extraction]
+        
+        for func in sql_function_set:
+            sql = func(text)
+            if sql and self._is_valid_sql(sql):
+                return self._clean_sql(sql) if clean else sql
 
         return ""
 
@@ -372,193 +348,6 @@ class DefaultPromptTemplate(BasePromptTemplate):
         return ""
 
 
-class AnthropicPromptTemplate(BasePromptTemplate):
-    """Prompt template optimized for Anthropic Claude models."""
-
-    def __init__(self, model_name: str = "claude-3-5-sonnet-20241022"):
-        super().__init__(model_name, "anthropic")
-
-    def create_prompt(
-        self,
-        question: str,
-        schema: str,
-        evidence: Optional[str] = None,
-        few_shot_examples: Optional[List[Dict]] = None
-    ) -> Tuple[str, str]:
-        """Create Anthropic-optimized prompt."""
-        full_question = question
-        if evidence:
-            full_question = f"{question}\n\nAdditional Context: {evidence}"
-
-        system_message = (
-            "You are an expert SQL developer with deep knowledge of database design and query optimization. "
-            "Your task is to generate accurate SQL queries based on natural language questions and database schemas.\n\n"
-            "Instructions:\n"
-            "1. Carefully analyze the provided database schema to understand table relationships\n"
-            "2. Consider the question's intent and required data\n"
-            "3. Generate a syntactically correct SQL query\n"
-            "4. Return ONLY the SQL query in a JSON format: {\"sql\": \"YOUR_QUERY_HERE\"}\n"
-            "5. Do not include explanations or additional text outside the JSON\n\n"
-            "Important:\n"
-            "- Use proper JOIN syntax when combining tables\n"
-            "- Pay attention to column names and data types\n"
-            "- Use appropriate aggregate functions when needed\n"
-            "- Ensure proper WHERE clause conditions"
-        )
-
-        examples_text = self._build_few_shot_examples(few_shot_examples)
-
-        user_message = (
-            f"{examples_text}"
-            f"Question: {full_question}\n\n"
-            f"Database Schema:\n"
-            f"```sql\n{schema}\n```\n\n"
-            f"Generate the SQL query in JSON format: {{\"sql\": \"YOUR_QUERY\"}}"
-        )
-
-        return system_message, user_message
-
-    def extract_sql(self, response_text: str, clean: bool = True) -> str:
-        """Extract SQL from Anthropic response."""
-        # Anthropic typically returns well-formatted JSON
-        return self._extract_sql_generic(response_text, clean)
-
-
-class OpenAIPromptTemplate(BasePromptTemplate):
-    """Prompt template optimized for OpenAI GPT models."""
-
-    def __init__(self, model_name: str = "gpt-4"):
-        super().__init__(model_name, "openai")
-
-    def create_prompt(
-        self,
-        question: str,
-        schema: str,
-        evidence: Optional[str] = None,
-        few_shot_examples: Optional[List[Dict]] = None
-    ) -> Tuple[str, str]:
-        """Create OpenAI-optimized prompt."""
-        full_question = question
-        if evidence:
-            full_question = f"{question}\n\nAdditional Context: {evidence}"
-
-        system_message = (
-            "You are an expert database developer specialized in writing SQL queries. "
-            "Given a natural language question and database schema, generate the appropriate SQL query.\n\n"
-            "Response format: Return a JSON object with a single 'sql' field containing the query.\n"
-            "Example: {\"sql\": \"SELECT column FROM table WHERE condition\"}\n\n"
-            "Guidelines:\n"
-            "- Write clean, efficient SQL queries\n"
-            "- Use proper JOIN syntax for multi-table queries\n"
-            "- Apply appropriate WHERE, GROUP BY, and ORDER BY clauses\n"
-            "- Use standard SQL syntax compatible with SQLite\n"
-            "- Return ONLY the JSON object, no additional text"
-        )
-
-        examples_text = self._build_few_shot_examples(few_shot_examples)
-
-        user_message = (
-            f"{examples_text}"
-            f"Natural Language Query:\n{full_question}\n\n"
-            f"Database Schema:\n```\n{schema}\n```\n\n"
-            f"Provide the SQL query as JSON:"
-        )
-
-        return system_message, user_message
-
-    def extract_sql(self, response_text: str, clean: bool = True) -> str:
-        """Extract SQL from OpenAI response."""
-        return self._extract_sql_generic(response_text, clean)
-
-
-class TogetherAIPromptTemplate(BasePromptTemplate):
-    """Prompt template optimized for Together.ai models."""
-
-    def __init__(self, model_name: str = "together-ai-model"):
-        super().__init__(model_name, "together_ai")
-
-    def create_prompt(
-        self,
-        question: str,
-        schema: str,
-        evidence: Optional[str] = None,
-        few_shot_examples: Optional[List[Dict]] = None
-    ) -> Tuple[str, str]:
-        """Create Together.ai-optimized prompt."""
-        full_question = question
-        if evidence:
-            full_question = f"{question}\n\nAdditional Context: {evidence}"
-
-        system_message = (
-            "You are a SQL query generation expert. Convert natural language questions into SQL queries.\n\n"
-            "Rules:\n"
-            "1. Analyze the database schema carefully\n"
-            "2. Generate syntactically correct SQL\n"
-            "3. Return result as JSON: {\"sql\": \"query here\"}\n"
-            "4. No explanations, only the JSON output\n\n"
-            "SQL Best Practices:\n"
-            "- Use explicit JOINs instead of implicit joins\n"
-            "- Add appropriate filters in WHERE clause\n"
-            "- Use aggregate functions correctly with GROUP BY"
-        )
-
-        examples_text = self._build_few_shot_examples(few_shot_examples)
-
-        user_message = (
-            f"{examples_text}"
-            f"Task: Convert this question to SQL\n\n"
-            f"Question: {full_question}\n\n"
-            f"Schema:\n```\n{schema}\n```\n\n"
-            f"Output JSON:"
-        )
-
-        return system_message, user_message
-
-    def extract_sql(self, response_text: str, clean: bool = True) -> str:
-        """Extract SQL from Together.ai response."""
-        return self._extract_sql_generic(response_text, clean)
-
-
-class LocalModelPromptTemplate(BasePromptTemplate):
-    """Prompt template optimized for local/open-source models."""
-
-    def __init__(self, model_name: str = "local-model"):
-        super().__init__(model_name, "local")
-
-    def create_prompt(
-        self,
-        question: str,
-        schema: str,
-        evidence: Optional[str] = None,
-        few_shot_examples: Optional[List[Dict]] = None
-    ) -> Tuple[str, str]:
-        """Create local model-optimized prompt (simpler, more direct)."""
-        full_question = question
-        if evidence:
-            full_question = f"{question}\n\nAdditional Context: {evidence}"
-
-        system_message = (
-            "You are a database expert. Generate SQL queries from natural language questions.\n"
-            "Output format: {\"sql\": \"YOUR_SQL_QUERY\"}\n"
-            "Only output the JSON, nothing else."
-        )
-
-        examples_text = self._build_few_shot_examples(few_shot_examples)
-
-        user_message = (
-            f"{examples_text}"
-            f"Question: {full_question}\n\n"
-            f"Schema:\n{schema}\n\n"
-            f"SQL (as JSON):"
-        )
-
-        return system_message, user_message
-
-    def extract_sql(self, response_text: str, clean: bool = True) -> str:
-        """Extract SQL from local model response."""
-        return self._extract_sql_generic(response_text, clean)
-
-
 class PromptTemplateRegistry:
     """
     Registry for managing prompt templates.
@@ -569,28 +358,8 @@ class PromptTemplateRegistry:
 
     _registry: Dict[str, type] = {}
     _default_templates: Dict[str, type] = {
-        # Anthropic models
-        "claude-3-opus-20240229": AnthropicPromptTemplate,
-        "claude-3-sonnet-20240229": AnthropicPromptTemplate,
-        "claude-3-haiku-20240307": AnthropicPromptTemplate,
-        "claude-3-5-sonnet-20241022": AnthropicPromptTemplate,
-        "claude-3-5-sonnet-20240620": AnthropicPromptTemplate,
-        "claude-3-5-haiku-20241022": AnthropicPromptTemplate,
-
-        # OpenAI models
-        "gpt-4": OpenAIPromptTemplate,
-        "gpt-4-turbo": OpenAIPromptTemplate,
-        "gpt-4o": OpenAIPromptTemplate,
-        "gpt-4o-mini": OpenAIPromptTemplate,
-        "gpt-3.5-turbo": OpenAIPromptTemplate,
-
-        # Model types (fallback)
-        "anthropic": AnthropicPromptTemplate,
-        "openai": OpenAIPromptTemplate,
-        "together_ai": TogetherAIPromptTemplate,
-        "local": LocalModelPromptTemplate,
-        "default": DefaultPromptTemplate,
-    }
+        "default": DefaultPromptTemplate
+    } 
 
     @classmethod
     def register(cls, model_name: str, template_class: type):
@@ -611,13 +380,12 @@ class PromptTemplateRegistry:
         cls._registry[model_name] = template_class
 
     @classmethod
-    def get(cls, model_name: str, model_type: str = None) -> BasePromptTemplate:
+    def get(cls, model_name: str) -> BasePromptTemplate:
         """
         Get a prompt template instance for a model.
 
         Args:
             model_name: Name of the model
-            model_type: Type of the model (fallback if model_name not found)
 
         Returns:
             Instance of the appropriate prompt template class
@@ -625,25 +393,9 @@ class PromptTemplateRegistry:
         # First, check custom registry
         if model_name in cls._registry:
             return cls._registry[model_name](model_name)
-
-        # Then, check default templates by model name
-        if model_name in cls._default_templates:
-            return cls._default_templates[model_name](model_name)
-
-        # Then, try model type
-        if model_type and model_type in cls._default_templates:
-            return cls._default_templates[model_type](model_name)
-
-        # Check if model name contains known patterns
-        model_name_lower = model_name.lower()
-        if "claude" in model_name_lower or "anthropic" in model_name_lower:
-            return AnthropicPromptTemplate(model_name)
-        elif "gpt" in model_name_lower or "openai" in model_name_lower:
-            return OpenAIPromptTemplate(model_name)
-        elif "llama" in model_name_lower or "mistral" in model_name_lower or "qwen" in model_name_lower:
-            return LocalModelPromptTemplate(model_name)
-
-        # Default fallback
+        else:
+            print(f"No custom template found for model '{model_name}', using default.")
+        # Otherwise, return default
         return DefaultPromptTemplate(model_name)
 
     @classmethod
@@ -659,22 +411,21 @@ class PromptTemplateRegistry:
 
 
 # Convenience functions
-def get_prompt_template(model_name: str, model_type: str = None) -> BasePromptTemplate:
+def get_prompt_template(model_name: str) -> BasePromptTemplate:
     """
     Get a prompt template instance for a model.
 
     Args:
         model_name: Name of the model
-        model_type: Type of the model (optional fallback)
 
     Returns:
         Instance of the appropriate prompt template class
 
     Example:
-        >>> template = get_prompt_template("claude-3-5-sonnet-20241022")
+        >>> template = get_prompt_template("arctic_text2sql_R1")
         >>> system_msg, user_msg = template.create_prompt("Get all users", schema)
     """
-    return PromptTemplateRegistry.get(model_name, model_type)
+    return PromptTemplateRegistry.get(model_name)
 
 
 def register_prompt_template(model_name: str, template_class: type):

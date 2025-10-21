@@ -39,7 +39,7 @@ class ModelProvider:
 class TogetherAIProvider(ModelProvider):
     """Provider for Together.ai API-based models"""
     
-    def __init__(self, model_name: str, api_key: str = None, max_tokens: int = 1024):
+    def __init__(self, model_name: str, api_key: str = None, param_config : Dict = None):
         """
         Initialize the Together.ai provider.
         
@@ -49,8 +49,8 @@ class TogetherAIProvider(ModelProvider):
         """
         self.model_name = model_name
         self.api_key = api_key or os.getenv("TOGETHER_API_KEY", API_KEY)
-        self.max_tokens = max_tokens
         self.total_limit = 8193  # Actual Together.ai limit
+        self.param_config = param_config or {}
         
         # Initialize OpenAI client with Together.ai API
         self.client = openai.OpenAI(
@@ -71,10 +71,10 @@ class TogetherAIProvider(ModelProvider):
         """
         input_text = system_message + user_message
         estimated_input_tokens = len(input_text) // 4  # rough estimate
-        
+        max_tokens = self.param_config.get("max_tokens", 1024)
         # Leave buffer and adjust max_tokens if needed
         available_tokens = 8100 - estimated_input_tokens - 100  # 100 token buffer
-        actual_max_tokens = min(self.max_tokens, available_tokens)
+        actual_max_tokens = min(max_tokens, available_tokens)
         actual_max_tokens = max(actual_max_tokens, 50)  # Minimum 50
         
         response = self.client.chat.completions.create(
@@ -83,7 +83,11 @@ class TogetherAIProvider(ModelProvider):
             messages=[
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": user_message},
-            ]
+            ],
+            temperature=self.param_config.get("temperature", 0.7),
+            top_p=self.param_config.get("top_p", 0.95),
+            frequency_penalty=self.param_config.get("frequency_penalty", 0.0),
+            presence_penalty=self.param_config.get("presence_penalty", 0.0)
         )
         
         return response.choices[0].message.content
@@ -91,7 +95,7 @@ class TogetherAIProvider(ModelProvider):
 class OpenAIProvider(ModelProvider):
     """Provider for OpenAI API-based models"""
     
-    def __init__(self, model_name: str, api_key: str = None):
+    def __init__(self, model_name: str, api_key: str = None, param_config : Dict = None):
         """
         Initialize the OpenAI provider.
         
@@ -101,6 +105,7 @@ class OpenAIProvider(ModelProvider):
         """
         self.model_name = model_name
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.param_config = param_config or {}
         
         # Initialize OpenAI client
         self.client = openai.OpenAI(
@@ -123,7 +128,11 @@ class OpenAIProvider(ModelProvider):
             messages=[
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": user_message},
-            ]
+            ],
+            temperature=self.param_config.get("temperature", 0.7),
+            top_p=self.param_config.get("top_p", 0.95),
+            frequency_penalty=self.param_config.get("frequency_penalty", 0.0),
+            presence_penalty=self.param_config.get("presence_penalty", 0.0)
         )
         
         return response.choices[0].message.content
@@ -285,7 +294,8 @@ class LocalHuggingFaceProvider(ModelProvider):
             except:
                 pass  # Fall back to manual formatting
         
-        # Manual formatting based on model type
+        # ! DOUBLE CHECK THIS PART ! #
+        # Manual formatting based on model type 
         model_name_lower = self.model_path.lower()
         
         if "llama" in model_name_lower and "chat" in model_name_lower:

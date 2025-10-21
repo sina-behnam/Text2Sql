@@ -10,11 +10,6 @@ from .prompt_engineering import (
     get_prompt_template,
     register_prompt_template,
     # Pre-registered templates
-    DefaultPromptTemplate,
-    AnthropicPromptTemplate,
-    OpenAIPromptTemplate,
-    TogetherAIPromptTemplate,
-    LocalModelPromptTemplate,
 )
 
 __all__ = [
@@ -23,8 +18,4 @@ __all__ = [
     'get_prompt_template',
     'register_prompt_template',
     'DefaultPromptTemplate',
-    'AnthropicPromptTemplate',
-    'OpenAIPromptTemplate',
-    'TogetherAIPromptTemplate',
-    'LocalModelPromptTemplate',
 ]

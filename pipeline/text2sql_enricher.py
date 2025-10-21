@@ -24,13 +24,27 @@ from src.models import (
                     LocalHuggingFaceProvider,
                     AnthropicProvider)
 
-from src.utils import (
+from src.utils.utils import (
                         check_exact_match,
                         check_execution_accuracy_2
                         )
 
-from utils.prompt_engineering import get_prompt_template
+from src.utils.prompt_engineering import get_prompt_template
 
+# make dir logs and remove old logs
+if not os.path.exists('./logs'):
+    os.makedirs('./logs')
+
+# setup logging and create the logger
+log_filename = f"./logs/text2sql_pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+    logging.FileHandler(log_filename),
+    ],
+    force=True
+)
 
 class Text2SQLInferencePipeline:
     """
@@ -38,8 +52,7 @@ class Text2SQLInferencePipeline:
     Supports both API-based and local models.
     """
     
-    def __init__(self, model_config: Dict, snowflake_config: Dict = None,
-                 few_shot_examples: List[Dict] = None):
+    def __init__(self, model_config: Dict, snowflake_config: Dict = None, prompt_template_key: str = 'default'):
         """
         Initialize the pipeline with dataset paths and model configuration.
 
@@ -53,19 +66,12 @@ class Text2SQLInferencePipeline:
                 - "max_new_tokens": Maximum tokens to generate (for local models)
                 - "max_tokens": Maximum tokens for Anthropic models
                 - "extended_thinking": Whether to use extended thinking for Anthropic
-            few_shot_examples: Optional list of example dicts with 'question', 'schema', 'sql' keys
-                               for few-shot prompting
         """
-        # setup logging and create the logger
-        logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
         self.logger.info("Initializing Text2SQLInferencePipeline...")
 
         # Use provided config or default
         self.model_config = model_config
-
-        # Store few-shot examples if provided
-        self.few_shot_examples = few_shot_examples
 
         # Initialize Snowflake credentials if provided
         self.creds = snowflake_config if snowflake_config else None
@@ -74,10 +80,7 @@ class Text2SQLInferencePipeline:
         self._init_model_provider()
 
         # Initialize the prompt template based on model name
-        self.prompt_template = get_prompt_template(
-            model_name=self.model_info['model_name'],
-            model_type=self.model_info['model_type']
-        )
+        self.prompt_template = get_prompt_template(prompt_template_key)  # Replace 'default' with your desired template key
         self.logger.info(f"Using prompt template: {self.prompt_template.__class__.__name__}")
 
     def _init_model_provider(self):
@@ -86,19 +89,20 @@ class Text2SQLInferencePipeline:
         model_name = self.model_config.get("name")
         model_path = self.model_config.get("path", None)
         extended_thinking = self.model_config.get("extended_thinking", False)
+        param_config = self.model_config.get("param_config")
         api_key = self.model_config.get("api_key")
         
         if model_type == "together_ai":
-            self.model_provider = TogetherAIProvider(model_name, api_key)
+            self.model_provider = TogetherAIProvider(model_name, api_key, param_config)
         elif model_type == "openai":
-            self.model_provider = OpenAIProvider(model_name, api_key)
+            self.model_provider = OpenAIProvider(model_name, api_key, param_config)
         elif model_type == "local":
             max_new_tokens = self.model_config.get("max_new_tokens", 512)
-            self.model_provider = LocalHuggingFaceProvider(model_path, "auto", max_new_tokens, extended_thinking=extended_thinking)
+            self.model_provider = LocalHuggingFaceProvider(model_path, "auto", max_new_tokens, extended_thinking=extended_thinking) # ! IT NEED TO ADD THE PARAM CONFIG LATER
         elif model_type == "anthropic":
             max_tokens = self.model_config.get("max_tokens", 1024)
             extended_thinking = self.model_config.get("extended_thinking", False)
-            self.model_provider = AnthropicProvider(model_name, api_key, max_tokens, extended_thinking)
+            self.model_provider = AnthropicProvider(model_name, api_key, max_tokens, extended_thinking) # ! IT NEED TO ADD THE PARAM CONFIG LATER
         else:
             raise ValueError(f"Unsupported model type: {model_type}. The available options are 'together_ai', 'openai', 'local', and 'anthropic'.")
         
@@ -106,6 +110,7 @@ class Text2SQLInferencePipeline:
         self.model_info = {
             "model_name": model_name,
             "model_type": model_type,
+            "param_config" : self.model_config.get("param_config"),
             "timestamp": datetime.now().isoformat()
         }
     
@@ -202,7 +207,6 @@ class Text2SQLInferencePipeline:
         else:
             raise ValueError(f"Unsupported database type: {db_type}")
     
-
     def evaluate_instance(self, instance: DatasetInstance, generated_sql: str, instance_path: str) -> Dict:
         """
         Evaluate the generated SQL query against the ground truth.
@@ -298,8 +302,7 @@ class Text2SQLInferencePipeline:
             system_message, user_message = self.prompt_template.create_prompt(
                 question=question,
                 schema=schema,
-                evidence=evidence,
-                few_shot_examples=self.few_shot_examples
+                evidence=evidence
             )
 
             # Giving the model provider, we can generate the SQL query.
@@ -344,8 +347,12 @@ class Text2SQLInferencePipeline:
                 evaluation['model'] = self.model_info
                 results.append(evaluation)
                 
-                # Update the original instance data with inference results
-                instance.inference_results = {
+                # 
+                existing_results = instance.inference_results if instance.inference_results else []
+                if not isinstance(existing_results, list):
+                    existing_results = [existing_results]
+
+                existing_results.append({
                     'has_prediction': True,
                     'model': self.model_info,
                     'predicted_output': {
@@ -353,11 +360,14 @@ class Text2SQLInferencePipeline:
                         'execution_correct': evaluation['predicted_output']['execution_correct'],
                         'execution_error': evaluation['predicted_output']['execution_error'],
                         'exact_match': evaluation['predicted_output']['exact_match'],
-                        'semantic_equivalent': evaluation['predicted_output'].get('semantic_equivalent', None),
+                        'semantic_equivalent': evaluation['predicted_output'].get('semantic_equivalent', None
+                        ),
                         'semantic_explanation': evaluation['predicted_output'].get('semantic_explanation', ''),
                         'raw_response': raw_response
                     }
-                }
+                })
+
+                instance.inference_results = existing_results
                 
                 self.logger.info(f"Execution correct: {evaluation['predicted_output']['execution_correct']}")
                 self.logger.info(f"Exact match: {evaluation['predicted_output']['exact_match']}")
