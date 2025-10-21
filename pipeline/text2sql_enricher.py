@@ -37,10 +37,11 @@ class Text2SQLInferencePipeline:
     Supports both API-based and local models.
     """
     
-    def __init__(self, model_config: Dict, snowflake_config: Dict = None):
+    def __init__(self, model_config: Dict, snowflake_config: Dict = None,
+                 few_shot_examples: List[Dict] = None):
         """
         Initialize the pipeline with dataset paths and model configuration.
-        
+
         Args:
             snowflake_config: Configuration for Snowflake connection, if applicable.
             model_config: Configuration for the model to use, with keys:
@@ -51,18 +52,23 @@ class Text2SQLInferencePipeline:
                 - "max_new_tokens": Maximum tokens to generate (for local models)
                 - "max_tokens": Maximum tokens for Anthropic models
                 - "extended_thinking": Whether to use extended thinking for Anthropic
+            few_shot_examples: Optional list of example dicts with 'question', 'schema', 'sql' keys
+                               for few-shot prompting
         """
         # setup logging and create the logger
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
         self.logger.info("Initializing Text2SQLInferencePipeline...")
-        
+
         # Use provided config or default
         self.model_config = model_config
-        
+
+        # Store few-shot examples if provided
+        self.few_shot_examples = few_shot_examples
+
         # Initialize Snowflake credentials if provided
-        self.creds = snowflake_config if snowflake_config else None 
-        
+        self.creds = snowflake_config if snowflake_config else None
+
         # Initialize the model provider based on config
         self._init_model_provider()
 
@@ -280,8 +286,15 @@ class Text2SQLInferencePipeline:
             evidence = instance.evidence
 
             # Generate SQL query
-            # Get the prompt messages
-            system_message, user_message = create_sql_prompt(question, schema, evidence)
+            # Get the prompt messages with model-specific formatting
+            system_message, user_message = create_sql_prompt(
+                question=question,
+                schema=schema,
+                evidence=evidence,
+                model_type=self.model_info['model_type'],
+                model_name=self.model_info['model_name'],
+                few_shot_examples=self.few_shot_examples
+            )
 
             # Giving the model provider, we can generate the SQL query.
             try:

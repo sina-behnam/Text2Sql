@@ -142,33 +142,158 @@ def check_execution_accuracy(predicted_sql: str, ground_truth_sql: str,
         except Exception as e:
             return False, f"Ground truth execution error: {str(e)}"
 
-def create_sql_prompt(question: str, schema, evidence = None) -> Tuple[str, str]:
+def create_sql_prompt(question: str, schema, evidence = None, model_type: str = "default",
+                      model_name: str = None, few_shot_examples: List[Dict] = None) -> Tuple[str, str]:
     """
-    Create a prompt for SQL generation.
-    
+    Create a model-specific prompt for SQL generation with customizable templates.
+
     Args:
         question: Natural language question to generate SQL for
         schema: Database schema information
         evidence: Additional evidence to consider (optional)
-        
+        model_type: Type of model ("openai", "anthropic", "together_ai", "local", or "default")
+        model_name: Specific model name for fine-tuned prompt selection
+        few_shot_examples: Optional list of example dicts with 'question', 'schema', 'sql' keys
+
     Returns:
         Tuple of (system_message, user_message)
     """
+    # Combine question with evidence if provided
+    full_question = question
     if evidence:
-        question = f"{question} \n (PS : {evidence})"
-    
-    # Format the system message
-    system_message = (
-        "You are a database expert. "
-        "You are supposed to provide a SQL query based on the user's question and the provided database schema. "
-        "Your response must be in JSON format with a field named 'sql' containing the generated SQL query. "
-        "Example response format: {\"sql\": \"SELECT * FROM table WHERE condition\"}"
-    )
-    
+        full_question = f"{question}\n\nAdditional Context: {evidence}"
+
+    # Get model-specific prompt template
+    system_message, user_template = _get_prompt_template(model_type, model_name)
+
+    # Add few-shot examples if provided
+    examples_text = ""
+    if few_shot_examples:
+        examples_text = "\n\nHere are some examples:\n\n"
+        for i, example in enumerate(few_shot_examples, 1):
+            examples_text += f"Example {i}:\n"
+            examples_text += f"Question: {example['question']}\n"
+            examples_text += f"Schema: {example['schema']}\n"
+            examples_text += f"SQL: {example['sql']}\n\n"
+
     # Format the user message
-    user_message = f"{question}\n\nHere is the database schema:\n```\n{schema}\n```"
-    
+    user_message = user_template.format(
+        question=full_question,
+        schema=schema,
+        examples=examples_text
+    )
+
     return system_message, user_message
+
+
+def _get_prompt_template(model_type: str, model_name: str = None) -> Tuple[str, str]:
+    """
+    Get model-specific prompt templates for SQL generation.
+
+    Args:
+        model_type: Type of model ("openai", "anthropic", "together_ai", "local", or "default")
+        model_name: Specific model name for fine-tuned selection
+
+    Returns:
+        Tuple of (system_message_template, user_message_template)
+    """
+    # Anthropic models (Claude) - prefer structured output with thinking
+    if model_type == "anthropic":
+        system_message = (
+            "You are an expert SQL developer with deep knowledge of database design and query optimization. "
+            "Your task is to generate accurate SQL queries based on natural language questions and database schemas.\n\n"
+            "Instructions:\n"
+            "1. Carefully analyze the provided database schema to understand table relationships\n"
+            "2. Consider the question's intent and required data\n"
+            "3. Generate a syntactically correct SQL query\n"
+            "4. Return ONLY the SQL query in a JSON format: {\"sql\": \"YOUR_QUERY_HERE\"}\n"
+            "5. Do not include explanations or additional text outside the JSON\n\n"
+            "Important:\n"
+            "- Use proper JOIN syntax when combining tables\n"
+            "- Pay attention to column names and data types\n"
+            "- Use appropriate aggregate functions when needed\n"
+            "- Ensure proper WHERE clause conditions"
+        )
+        user_template = (
+            "{examples}"
+            "Question: {question}\n\n"
+            "Database Schema:\n"
+            "```sql\n{schema}\n```\n\n"
+            "Generate the SQL query in JSON format: {{\"sql\": \"YOUR_QUERY\"}}"
+        )
+
+    # OpenAI models - prefer structured output with clear formatting
+    elif model_type == "openai":
+        system_message = (
+            "You are an expert database developer specialized in writing SQL queries. "
+            "Given a natural language question and database schema, generate the appropriate SQL query.\n\n"
+            "Response format: Return a JSON object with a single 'sql' field containing the query.\n"
+            "Example: {\"sql\": \"SELECT column FROM table WHERE condition\"}\n\n"
+            "Guidelines:\n"
+            "- Write clean, efficient SQL queries\n"
+            "- Use proper JOIN syntax for multi-table queries\n"
+            "- Apply appropriate WHERE, GROUP BY, and ORDER BY clauses\n"
+            "- Use standard SQL syntax compatible with SQLite\n"
+            "- Return ONLY the JSON object, no additional text"
+        )
+        user_template = (
+            "{examples}"
+            "Natural Language Query:\n{question}\n\n"
+            "Database Schema:\n```\n{schema}\n```\n\n"
+            "Provide the SQL query as JSON:"
+        )
+
+    # Together.ai and other API models
+    elif model_type == "together_ai":
+        system_message = (
+            "You are a SQL query generation expert. Convert natural language questions into SQL queries.\n\n"
+            "Rules:\n"
+            "1. Analyze the database schema carefully\n"
+            "2. Generate syntactically correct SQL\n"
+            "3. Return result as JSON: {\"sql\": \"query here\"}\n"
+            "4. No explanations, only the JSON output\n\n"
+            "SQL Best Practices:\n"
+            "- Use explicit JOINs instead of implicit joins\n"
+            "- Add appropriate filters in WHERE clause\n"
+            "- Use aggregate functions correctly with GROUP BY"
+        )
+        user_template = (
+            "{examples}"
+            "Task: Convert this question to SQL\n\n"
+            "Question: {question}\n\n"
+            "Schema:\n```\n{schema}\n```\n\n"
+            "Output JSON:"
+        )
+
+    # Local models - simpler, more direct prompts
+    elif model_type == "local":
+        system_message = (
+            "You are a database expert. Generate SQL queries from natural language questions.\n"
+            "Output format: {\"sql\": \"YOUR_SQL_QUERY\"}\n"
+            "Only output the JSON, nothing else."
+        )
+        user_template = (
+            "{examples}"
+            "Question: {question}\n\n"
+            "Schema:\n{schema}\n\n"
+            "SQL (as JSON):"
+        )
+
+    # Default fallback template
+    else:
+        system_message = (
+            "You are a database expert. "
+            "Generate a SQL query based on the user's question and the provided database schema. "
+            "Your response must be in JSON format with a field named 'sql' containing the generated SQL query. "
+            "Example response format: {\"sql\": \"SELECT * FROM table WHERE condition\"}"
+        )
+        user_template = (
+            "{examples}"
+            "{question}\n\n"
+            "Database schema:\n```\n{schema}\n```"
+        )
+
+    return system_message, user_template
 
 def normalize_sql(sql: str) -> str:
     """
@@ -209,72 +334,189 @@ def check_exact_match(predicted_sql: str, ground_truth_sql: str) -> bool:
     # Compare normalized queries
     return normalized_pred == normalized_gt
 
-def extract_sql_query_from_text(text: str) -> str:
-        """
-        Extract SQL query from text, handling various formats (JSON, code blocks, etc.)
-        
-        Args:
-            text: Raw text output that may contain SQL query
-            
-        Returns:
-            Extracted SQL query as a string, or empty string if extraction fails
-        """
-        # Removing the <think> and </think> tags if present
-        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-        text = re.sub(r'<think>', '', text)
-        # Try to find SQL in JSON format first
-        json_match = re.search(r'(\{.*"sql".*\})', text, re.DOTALL)
-        
-        if json_match:
-            json_str = json_match.group(1)
-            try:
-                # Try to parse the matched string as JSON
-                json_obj = json.loads(json_str)
-                if "sql" in json_obj:
-                    return json_obj["sql"]
-            except json.JSONDecodeError:
-                pass
-        
-        # Try to find SQL in code blocks with ```sql or ```SQL format
-        sql_code_block = re.search(r'```(?:sql|SQL)\s*([\s\S]*?)```', text, re.DOTALL)
-        if sql_code_block:
-            return sql_code_block.group(1).strip()
-        
-        # Try to find SQL in any code blocks
-        any_code_block = re.search(r'```\s*([\s\S]*?)```', text, re.DOTALL)
-        if any_code_block:
-            code_content = any_code_block.group(1).strip()
-            # Check if it looks like SQL (contains SELECT, FROM, etc.)
-            if re.search(r'\b(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)\b', code_content, re.IGNORECASE):
-                return code_content
-        
-        # Try to find patterns that look like SQL queries directly in the text
-        sql_patterns = [
-            # Look for SELECT statement
-            r'(?:query:?\s*)?(SELECT\s+[\s\S]*?(?:FROM\s+[\s\S]*?)(?:;|$))',
-            # Look for other common SQL statements
-            r'(?:query:?\s*)?(INSERT\s+INTO\s+[\s\S]*?(?:;|$))',
-            r'(?:query:?\s*)?(UPDATE\s+[\s\S]*?(?:;|$))',
-            r'(?:query:?\s*)?(DELETE\s+FROM\s+[\s\S]*?(?:;|$))',
-            r'(?:query:?\s*)?(CREATE\s+TABLE\s+[\s\S]*?(?:;|$))'
-        ]
-        
-        for pattern in sql_patterns:
-            sql_match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-            if sql_match:
-                return sql_match.group(1).strip()
-        
-        # If we still haven't found a SQL query, look for "The SQL query is:" patterns
-        sql_intro_match = re.search(r'(?:The SQL query is:?|Here\'s the SQL:?|Generated SQL:?)\s*([\s\S]*?)(?:\n\n|$)', text, re.DOTALL)
-        if sql_intro_match:
-            # Get the content after the introduction
-            potential_sql = sql_intro_match.group(1).strip()
-            # Check if it looks like SQL
-            if re.search(r'\b(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)\b', potential_sql, re.IGNORECASE):
-                return potential_sql
-        
-        # No SQL query found
+def extract_sql_query_from_text(text: str, clean: bool = True) -> str:
+    """
+    Extract SQL query from text, handling various formats (JSON, code blocks, XML tags, etc.)
+    with improved robustness and support for multiple model output formats.
+
+    Args:
+        text: Raw text output that may contain SQL query
+        clean: Whether to clean the extracted SQL (remove comments, extra whitespace)
+
+    Returns:
+        Extracted SQL query as a string, or empty string if extraction fails
+    """
+    if not text or not isinstance(text, str):
         return ""
+
+    original_text = text
+
+    # Step 1: Remove thinking tags (multiple formats)
+    # Remove <think>...</think> tags (Anthropic extended thinking)
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # Remove orphaned <think> or </think> tags
+    text = re.sub(r'</?think>', '', text, flags=re.IGNORECASE)
+    # Remove <thinking>...</thinking> tags (some models use this)
+    text = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+    # Step 2: Try JSON extraction with multiple approaches
+    # Approach 2a: Look for JSON with "sql" field (most common)
+    json_patterns = [
+        r'\{[^{}]*"sql"\s*:\s*"([^"]*(?:\\.[^"]*)*)"[^{}]*\}',  # Compact JSON
+        r'\{[^{}]*\'sql\'\s*:\s*\'([^\']*(?:\\.[^\']*)*)\'[^{}]*\}',  # Single quotes
+        r'(\{[^{}]*"sql"[^{}]*\})',  # Full JSON object
+    ]
+
+    for pattern in json_patterns:
+        matches = re.finditer(pattern, text, re.DOTALL)
+        for match in matches:
+            try:
+                if len(match.groups()) == 1 and not match.group(1).startswith('{'):
+                    # Direct SQL extraction from "sql": "..." pattern
+                    sql = match.group(1)
+                    # Unescape JSON escapes
+                    sql = sql.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
+                    if _is_valid_sql(sql):
+                        return _clean_sql(sql) if clean else sql
+                else:
+                    # Full JSON object
+                    json_str = match.group(1) if match.group(1).startswith('{') else match.group(0)
+                    json_obj = json.loads(json_str)
+                    if "sql" in json_obj and json_obj["sql"]:
+                        sql = json_obj["sql"]
+                        if _is_valid_sql(sql):
+                            return _clean_sql(sql) if clean else sql
+            except (json.JSONDecodeError, KeyError, IndexError):
+                continue
+
+    # Step 3: Try code blocks (markdown/other formats)
+    code_block_patterns = [
+        r'```sql\s*(.*?)```',
+        r'```SQL\s*(.*?)```',
+        r'```\s*(SELECT[\s\S]*?)```',  # Any code block starting with SELECT
+        r'```\s*(.*?)```',  # Generic code block
+    ]
+
+    for pattern in code_block_patterns:
+        matches = re.finditer(pattern, text, re.DOTALL | re.IGNORECASE)
+        for match in matches:
+            sql_candidate = match.group(1).strip()
+            if _is_valid_sql(sql_candidate):
+                return _clean_sql(sql_candidate) if clean else sql_candidate
+
+    # Step 4: Try XML-style tags
+    xml_patterns = [
+        r'<sql>(.*?)</sql>',
+        r'<query>(.*?)</query>',
+        r'<SQL>(.*?)</SQL>',
+    ]
+
+    for pattern in xml_patterns:
+        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        if match:
+            sql_candidate = match.group(1).strip()
+            if _is_valid_sql(sql_candidate):
+                return _clean_sql(sql_candidate) if clean else sql_candidate
+
+    # Step 5: Look for SQL with introductory phrases
+    intro_patterns = [
+        r'(?:SQL query|query|SQL|answer):\s*["\']?(SELECT[\s\S]+?)(?:["\']?\s*(?:\n\n|$))',
+        r'(?:The SQL (?:query )?is|Here\'s the SQL|Generated SQL):\s*["\']?(SELECT[\s\S]+?)(?:["\']?\s*(?:\n\n|$))',
+        r'(?:Result|Output):\s*["\']?(SELECT[\s\S]+?)(?:["\']?\s*(?:\n\n|$))',
+    ]
+
+    for pattern in intro_patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if match:
+            sql_candidate = match.group(1).strip().strip('"\'')
+            if _is_valid_sql(sql_candidate):
+                return _clean_sql(sql_candidate) if clean else sql_candidate
+
+    # Step 6: Direct SQL pattern matching (last resort)
+    # Look for SQL statements with proper boundaries
+    sql_statement_patterns = [
+        r'\b(SELECT\s+(?:DISTINCT\s+)?[\s\S]+?FROM\s+[\s\S]+?)(?:;|\n\n|$)',
+        r'\b(WITH\s+[\s\S]+?SELECT\s+[\s\S]+?)(?:;|\n\n|$)',  # CTE queries
+        r'\b(INSERT\s+INTO\s+[\s\S]+?)(?:;|\n\n|$)',
+        r'\b(UPDATE\s+[\s\S]+?SET\s+[\s\S]+?)(?:;|\n\n|$)',
+        r'\b(DELETE\s+FROM\s+[\s\S]+?)(?:;|\n\n|$)',
+    ]
+
+    for pattern in sql_statement_patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if match:
+            sql_candidate = match.group(1).strip()
+            # Make sure it's not part of a larger explanation
+            if _is_valid_sql(sql_candidate) and len(sql_candidate) > 10:
+                return _clean_sql(sql_candidate) if clean else sql_candidate
+
+    # If nothing found, return empty string
+    return ""
+
+
+def _is_valid_sql(text: str) -> bool:
+    """
+    Check if text looks like a valid SQL query.
+
+    Args:
+        text: Text to validate
+
+    Returns:
+        True if text appears to be valid SQL
+    """
+    if not text or len(text.strip()) < 5:
+        return False
+
+    text = text.strip().upper()
+
+    # Must start with a SQL keyword
+    sql_keywords = ['SELECT', 'WITH', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP']
+    if not any(text.startswith(kw) for kw in sql_keywords):
+        return False
+
+    # For SELECT queries, should have FROM (with some exceptions)
+    if text.startswith('SELECT'):
+        # Allow SELECT without FROM for simple expressions (e.g., SELECT 1)
+        if 'FROM' not in text and len(text) > 50:
+            return False
+
+    # Should not contain common non-SQL markers
+    non_sql_markers = ['PRINT', 'CONSOLE', 'ECHO', 'RETURN', 'FUNCTION', 'CLASS']
+    if any(marker in text for marker in non_sql_markers):
+        return False
+
+    return True
+
+
+def _clean_sql(sql: str) -> str:
+    """
+    Clean extracted SQL query by removing comments, extra whitespace, etc.
+
+    Args:
+        sql: Raw SQL query string
+
+    Returns:
+        Cleaned SQL query
+    """
+    if not sql:
+        return ""
+
+    # Remove SQL comments (-- style)
+    sql = re.sub(r'--[^\n]*', '', sql)
+
+    # Remove SQL comments (/* */ style)
+    sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
+
+    # Remove extra whitespace
+    sql = re.sub(r'\s+', ' ', sql)
+
+    # Remove leading/trailing whitespace
+    sql = sql.strip()
+
+    # Remove trailing semicolon if present (some systems don't want it)
+    sql = sql.rstrip(';').strip()
+
+    return sql
 
 def read_json_file(file_path: str):
     """Read JSON file - handles both regular JSON and JSONL."""
