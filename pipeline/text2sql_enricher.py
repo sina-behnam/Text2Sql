@@ -1,193 +1,247 @@
+"""
+LangChain-based Text2SQL Inference Pipeline
+
+Enhanced pipeline using LangChain for SQL generation, evaluation, and semantic analysis.
+Supports multiple model providers with unified interface.
+"""
+
 import os
-import re
-import glob
-import sqlite3
-import pandas as pd
-from typing import Dict, Tuple, List
-import sqlparse
 import json
-from datetime import datetime
+import sqlite3
 import logging
+from datetime import datetime
+from typing import Dict, Tuple, List, Optional
 from tqdm import tqdm
 
-# Add this import at the top
+# Snowflake support
 try:
     import snowflake.connector
     HAS_SNOWFLAKE = True
 except ImportError:
     HAS_SNOWFLAKE = False
 
+# LangChain imports
+from langchain_core.messages import SystemMessage, HumanMessage
+
+# Local imports
 from src.dataloader import DatasetInstance
-from src.models import (
-                    TogetherAIProvider,
-                    OpenAIProvider,
-                    LocalHuggingFaceProvider,
-                    AnthropicProvider)
+from src.models import get_model_provider
+from src.utils.utils import check_exact_match, check_execution_accuracy_2
+from src.utils.prompt_engineering import (
+    SQLOutputParser,
+    Text2SQLPromptTemplate,
+    SemanticEquivalencePromptTemplate,
+    create_sql_generation_chain,
+    create_semantic_equivalence_chain
+)
 
-from src.utils.utils import (
-                        check_exact_match,
-                        check_execution_accuracy_2
-                        )
-
-from src.utils.prompt_engineering import get_prompt_template
-
-# make dir logs and remove old logs
+# Setup logging
 if not os.path.exists('./logs'):
     os.makedirs('./logs')
 
-# setup logging and create the logger
 log_filename = f"./logs/text2sql_pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-    logging.FileHandler(log_filename),
+        logging.FileHandler(log_filename),
     ],
     force=True
 )
 
+
 class Text2SQLInferencePipeline:
     """
-    Pipeline for Text2SQL Inferencing task: loading data, generating SQL queries, and evaluating results.
-    Supports both API-based and local models.
+    LangChain-based pipeline for Text2SQL inference.
+
+    Features:
+    - Unified LLM interface via LangChain
+    - Structured prompt templates
+    - Robust SQL extraction with output parsers
+    - Semantic equivalence checking
+    - Comprehensive evaluation metrics
     """
-    
-    def __init__(self, model_config: Dict, snowflake_config: Dict = None, prompt_template_key: str = 'default'):
+
+    def __init__(
+        self,
+        model_config: Dict,
+        snowflake_config: Optional[Dict] = None,
+        sql_dialect: str = "SQLite"
+    ):
         """
-        Initialize the pipeline with dataset paths and model configuration.
+        Initialize the Text2SQL pipeline.
 
         Args:
-            snowflake_config: Configuration for Snowflake connection, if applicable.
-            model_config: Configuration for the model to use, with keys:
-                - "type": "together_ai", "openai", "local", or "anthropic"
-                - "name": Model name (for API models) or path (for local models)
-                - "api_key": API key (for API models)
-                - "device": Device to use for local models ("cpu", "cuda", "auto")
-                - "max_new_tokens": Maximum tokens to generate (for local models)
-                - "max_tokens": Maximum tokens for Anthropic models
-                - "extended_thinking": Whether to use extended thinking for Anthropic
+            model_config: Model configuration with keys:
+                - type: "openai", "anthropic", "together_ai", or "local"
+                - name/path: Model identifier
+                - api_key: API key (for API models)
+                - temperature, max_tokens, etc.
+            snowflake_config: Snowflake connection config (optional)
+            sql_dialect: SQL dialect for query generation
         """
         self.logger = logging.getLogger(__name__)
-        self.logger.info("Initializing Text2SQLInferencePipeline...")
+        self.logger.info("Initializing LangChain-based Text2SQL Pipeline...")
 
-        # Use provided config or default
         self.model_config = model_config
+        self.snowflake_config = snowflake_config
+        self.sql_dialect = sql_dialect
 
-        # Initialize Snowflake credentials if provided
-        self.creds = snowflake_config if snowflake_config else None
+        # Initialize model provider using LangChain
+        self.model_provider = get_model_provider(model_config)
+        self.llm = self.model_provider.get_llm()
 
-        # Initialize the model provider based on config
-        self._init_model_provider()
+        # Initialize chains
+        self.sql_chain = create_sql_generation_chain(self.llm, sql_dialect)
+        self.equivalence_chain = create_semantic_equivalence_chain(self.llm)
 
-        # Initialize the prompt template based on model name
-        self.prompt_template = get_prompt_template(prompt_template_key)  # Replace 'default' with your desired template key
-        self.logger.info(f"Using prompt template: {self.prompt_template.__class__.__name__}")
-
-    def _init_model_provider(self):
-        """Initialize the model provider based on the configuration"""
-        model_type = self.model_config.get("type", "together_ai").lower()
-        model_name = self.model_config.get("name")
-        model_path = self.model_config.get("path", None)
-        extended_thinking = self.model_config.get("extended_thinking", False)
-        param_config = self.model_config.get("param_config")
-        api_key = self.model_config.get("api_key")
-        
-        if model_type == "together_ai":
-            self.model_provider = TogetherAIProvider(model_name, api_key, param_config)
-        elif model_type == "openai":
-            self.model_provider = OpenAIProvider(model_name, api_key, param_config)
-        elif model_type == "local":
-            max_new_tokens = self.model_config.get("max_new_tokens", 512)
-            self.model_provider = LocalHuggingFaceProvider(model_path, "auto", max_new_tokens, extended_thinking=extended_thinking) # ! IT NEED TO ADD THE PARAM CONFIG LATER
-        elif model_type == "anthropic":
-            max_tokens = self.model_config.get("max_tokens", 1024)
-            extended_thinking = self.model_config.get("extended_thinking", False)
-            self.model_provider = AnthropicProvider(model_name, api_key, max_tokens, extended_thinking) # ! IT NEED TO ADD THE PARAM CONFIG LATER
-        else:
-            raise ValueError(f"Unsupported model type: {model_type}. The available options are 'together_ai', 'openai', 'local', and 'anthropic'.")
-        
-        # Store model info for later use
+        # Store model info for tracking
         self.model_info = {
-            "model_name": model_name,
-            "model_type": model_type,
-            "param_config" : self.model_config.get("param_config"),
+            "model_name": model_config.get("name") or model_config.get("path"),
+            "model_type": model_config.get("type"),
             "timestamp": datetime.now().isoformat()
         }
-    
-    def check_sql_semantic_equivalence(self, predicted_sql: str, ground_truth_sql: str, 
-                                  question: str) -> Tuple[bool, str]:
+
+        self.logger.info(f"Initialized {self.model_info['model_type']} model: {self.model_info['model_name']}")
+
+    def generate_sql(
+        self,
+        question: str,
+        schema: str,
+        evidence: Optional[str] = None
+    ) -> Tuple[str, str]:
         """
-        Use the configured model to determine if two SQL queries are semantically equivalent,
-        even if they have syntactic differences.
-        
+        Generate SQL query using LangChain chain.
+
         Args:
-            predicted_sql: Predicted SQL query
+            question: Natural language question
+            schema: Database schema
+            evidence: Additional context (optional)
+
+        Returns:
+            Tuple of (generated_sql, raw_response)
+        """
+        try:
+            # Get prompt template and parser from chain
+            prompt_template = self.sql_chain["prompt_template"]
+            parser = self.sql_chain["parser"]
+
+            # Format prompt
+            formatted_prompt = prompt_template.format_prompt(
+                question=question,
+                schema=schema,
+                evidence=evidence
+            )
+
+            # Invoke LLM
+            messages = formatted_prompt.format_messages(
+                dialect=self.sql_dialect,
+                question=question,
+                schema=schema,
+                evidence=f"\nAdditional Context:\n{evidence}" if evidence else ""
+            )
+
+            response = self.llm.invoke(messages)
+            raw_response = response.content
+
+            # Parse SQL from response
+            generated_sql = parser.parse(raw_response)
+
+            return generated_sql, raw_response
+
+        except Exception as e:
+            self.logger.error(f"Error generating SQL: {e}")
+            raise
+
+    def check_semantic_equivalence(
+        self,
+        predicted_sql: str,
+        ground_truth_sql: str,
+        question: str
+    ) -> Tuple[bool, str]:
+        """
+        Check if two SQL queries are semantically equivalent using LangChain.
+
+        Args:
+            predicted_sql: Generated SQL query
             ground_truth_sql: Ground truth SQL query
-            question: The original natural language question
-            
+            question: Original question
+
         Returns:
             Tuple of (is_equivalent, explanation)
         """
-        # Create system message for the judge
-        system_message = (
-            "You are a SQL expert tasked with determining if two SQL queries are semantically equivalent. "
-            "This means they may have syntactic differences but would return the same results when executed "
-            "on the same database. Common acceptable differences include: "
-            "- Different column ordering in SELECT statements "
-            "- Presence or absence of column aliases (AS) "
-            "- Different formatting, spacing, or capitalization "
-            "- Use of quotes around identifiers "
-            "- Simple reordering of conditions that doesn't change the logic "
-            "\n\nYour response must be in JSON format with two fields: "
-            "'equivalent' (true/false) and 'explanation' (a brief explanation of your judgment)."
-        )
-        
-        # Create user message
-        user_message = (
-            f"Question: {question}\n\n"
-            f"Gold SQL Query: {ground_truth_sql}\n\n"
-            f"Generated SQL Query: {predicted_sql}\n\n"
-            "Are these two SQL queries semantically equivalent? Provide your judgment."
-        )
-        
         try:
-            # Generate response using the configured model provider
-            raw_response = self.model_provider.generate(system_message, user_message)
-            
-            # Try to extract JSON
-            json_match = re.search(r'(\{.*\})', raw_response, re.DOTALL)
+            # Get prompt template from chain
+            prompt_template = self.equivalence_chain["prompt_template"]
+
+            # Format prompt
+            formatted_prompt = prompt_template.format_prompt(
+                question=question,
+                ground_truth_sql=ground_truth_sql,
+                predicted_sql=predicted_sql
+            )
+
+            # Invoke LLM
+            messages = formatted_prompt.format_messages(
+                question=question,
+                ground_truth_sql=ground_truth_sql,
+                predicted_sql=predicted_sql
+            )
+
+            response = self.llm.invoke(messages)
+            raw_response = response.content
+
+            # Try to parse JSON response
+            import re
+            json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
             if json_match:
                 try:
-                    json_obj = json.loads(json_match.group(1))
-                    if "equivalent" in json_obj:
-                        return json_obj["equivalent"], json_obj.get("explanation", "")
+                    result = json.loads(json_match.group(0))
+                    return result.get("equivalent", False), result.get("explanation", "")
                 except json.JSONDecodeError:
                     pass
-            
-            # If JSON extraction fails, look for yes/no in the response
-            if re.search(r'\b(yes|equivalent|same|equal)\b', raw_response, re.IGNORECASE):
-                return True, "Model indicated equivalence but didn't provide structured output"
-            elif re.search(r'\b(no|not equivalent|different|not the same)\b', raw_response, re.IGNORECASE):
-                return False, "Model indicated non-equivalence but didn't provide structured output"
-            
-            # Default to relying on execution results
-            return False, "Could not determine semantic equivalence from model response"
-        
+
+            # Fallback: look for yes/no
+            if re.search(r'\b(yes|equivalent|true)\b', raw_response, re.IGNORECASE):
+                return True, "Model indicated equivalence"
+            elif re.search(r'\b(no|not equivalent|false)\b', raw_response, re.IGNORECASE):
+                return False, "Model indicated non-equivalence"
+
+            return False, "Could not parse model response"
+
         except Exception as e:
-            # If the model call fails, default to relying on execution results
-            return False, f"Error in semantic check: {str(e)}"
-                    
-    def get_db_connection(self, instance: DatasetInstance, instance_path: str = None):
-        """Get database connection based on type"""
+            self.logger.error(f"Error checking semantic equivalence: {e}")
+            return False, f"Error: {str(e)}"
+
+    def get_db_connection(
+        self,
+        instance: DatasetInstance,
+        instance_path: str = None
+    ) -> Tuple:
+        """
+        Get database connection based on instance configuration.
+
+        Args:
+            instance: Dataset instance
+            instance_path: Path to instance file
+
+        Returns:
+            Tuple of (connection, db_type)
+        """
         database_info = instance.database
         db_type = database_info.get('type', 'sqlite').lower()
 
         if db_type == 'sqlite' and instance.dataset != 'spider2-lite':
             db_name = database_info['name']
-            db_file = database_info['path'][0].split('/')[-1]  # Get the last part of the path
-            database_path = os.path.join(os.path.dirname(instance_path),'databases', db_name,  db_file)
+            db_file = database_info['path'][0].split('/')[-1]
+            database_path = os.path.join(
+                os.path.dirname(instance_path),
+                'databases',
+                db_name,
+                db_file
+            )
             return sqlite3.connect(database_path), 'sqlite'
-        
+
         elif db_type == 'sqlite' and instance.dataset == 'spider2-lite':
             db_file = database_info['path'][0]
             database_path = os.path.join(os.path.dirname(instance_path), db_file)
@@ -197,68 +251,65 @@ class Text2SQLInferencePipeline:
             if not HAS_SNOWFLAKE:
                 raise ImportError("Install snowflake-connector-python")
 
-            # Load credentials
             conn = snowflake.connector.connect(
                 database=database_info['name'],
-                **self.creds
+                **self.snowflake_config
             )
             return conn, 'snowflake'
 
         else:
             raise ValueError(f"Unsupported database type: {db_type}")
-    
-    def evaluate_instance(self, instance: DatasetInstance, generated_sql: str, instance_path: str) -> Dict:
+
+    def evaluate_instance(
+        self,
+        instance: DatasetInstance,
+        generated_sql: str,
+        instance_path: str
+    ) -> Dict:
         """
-        Evaluate the generated SQL query against the ground truth.
-        
+        Evaluate generated SQL against ground truth.
+
         Args:
-            instance: The DatasetInstance object containing question, schema, and ground truth SQL
-            generated_sql: The SQL query generated by the model
-            instance_path: Path to the original instance file for database connection
-            
+            instance: Dataset instance
+            generated_sql: Generated SQL query
+            instance_path: Path to instance file
+
         Returns:
-            Evaluation results as a dictionary with the full instance data and prediction information
+            Evaluation results dictionary
         """
-        
         # Get database connection
         db_connection, db_type = self.get_db_connection(instance, instance_path)
-        
+
         # Check execution accuracy
         exec_correct, exec_error = check_execution_accuracy_2(
             generated_sql, instance.sql, db_connection
         )
-        
+
         # Check exact match
         exact_match = check_exact_match(generated_sql, instance.sql)
-        
-        # If not exact match but execution is correct, or execution failed,
-        # check semantic equivalence using the model
+
+        # Determine semantic equivalence
         semantic_equivalent = None
         semantic_explanation = None
-        
-        # Determine semantic equivalence based on exact match, execution correctness, and errors
+
         if exact_match:
-            # If exact match, queries are semantically equivalent
             semantic_equivalent = True
             semantic_explanation = "Exact match found"
         elif exec_correct:
-            # If execution is correct but not exact match, consider it semantically equivalent
             semantic_equivalent = True
-            semantic_explanation = "Execution correct but not exact match"
+            semantic_explanation = "Execution correct"
         elif exec_error and exec_error.strip():
-            # If there's a non-empty execution error, queries are not semantically equivalent
             semantic_equivalent = False
             semantic_explanation = f"Execution failed: {exec_error}"
         else:
-            # Otherwise, use the model to check semantic equivalence
-            # This catches cases with no exact match, incorrect execution, but no specific error
-            semantic_equivalent, semantic_explanation = self.check_sql_semantic_equivalence(
+            # Use LLM to check semantic equivalence
+            semantic_equivalent, semantic_explanation = self.check_semantic_equivalence(
                 generated_sql, instance.sql, instance.question
             )
-        
-        # Close database connection
+
+        # Close connection
         db_connection.close()
-        
+
         return {
             'instance': instance,
             'has_prediction': True,
@@ -271,151 +322,156 @@ class Text2SQLInferencePipeline:
                 'semantic_explanation': semantic_explanation
             }
         }
-    
-    def run_pipeline(self, instances: List[Tuple[DatasetInstance, str]], save_updated_files: bool = True, 
-                    output_dir: str = None) -> Dict:
+
+    def run_pipeline(
+        self,
+        instances: List[Tuple[DatasetInstance, str]],
+        save_updated_files: bool = True,
+        output_dir: Optional[str] = None
+    ) -> Dict:
         """
-        Run the complete pipeline: load data, generate SQL, evaluate, and update JSON files.
-        
+        Run the complete inference pipeline.
+
         Args:
-            instances: List of tuples containing (DatasetInstance, file_path)
-            save_updated_files: Whether to save updated JSON files
-            output_dir: Directory to save updated files (if None, will update files in place)
-            
+            instances: List of (DatasetInstance, file_path) tuples
+            save_updated_files: Whether to save results to files
+            output_dir: Output directory (if None, updates in place)
+
         Returns:
-            Evaluation results with comprehensive information
+            Evaluation metrics dictionary
         """
-        
         results = []
-        
+
         # Process each instance
         for instance, file_path in tqdm(instances, desc="Processing instances", unit="instance"):
             self.logger.info(f"Processing instance {instance.id}...")
-            
-            # Set up the data that require to generate SQL.
+
+            # Extract instance data
             question = instance.question
-            schema = instance.schemas
+            schema = json.dumps(instance.schemas, indent=2)  # Convert to string
             evidence = instance.evidence
 
-            # Generate SQL query
-            # Get the prompt messages using the prompt template
-            system_message, user_message = self.prompt_template.create_prompt(
-                question=question,
-                schema=schema,
-                evidence=evidence
-            )
-
-            # Giving the model provider, we can generate the SQL query.
             try:
-                # Generate response using the configured model provider
-                raw_response = self.model_provider.generate(system_message, user_message)
+                # Generate SQL using LangChain
+                generated_sql, raw_response = self.generate_sql(
+                    question=question,
+                    schema=schema,
+                    evidence=evidence
+                )
+
+                if generated_sql:
+                    # Evaluate the generated SQL
+                    evaluation = self.evaluate_instance(instance, generated_sql, file_path)
+                    evaluation['model'] = self.model_info
+                    results.append(evaluation)
+
+                    # Update instance with results
+                    existing_results = instance.inference_results if instance.inference_results else []
+                    if not isinstance(existing_results, list):
+                        existing_results = [existing_results]
+
+                    existing_results.append({
+                        'has_prediction': True,
+                        'model': self.model_info,
+                        'predicted_output': {
+                            'generated_sql': generated_sql,
+                            'execution_correct': evaluation['predicted_output']['execution_correct'],
+                            'execution_error': evaluation['predicted_output']['execution_error'],
+                            'exact_match': evaluation['predicted_output']['exact_match'],
+                            'semantic_equivalent': evaluation['predicted_output'].get('semantic_equivalent'),
+                            'semantic_explanation': evaluation['predicted_output'].get('semantic_explanation', ''),
+                            'raw_response': raw_response
+                        }
+                    })
+
+                    instance.inference_results = existing_results
+
+                    self.logger.info(f"Execution correct: {evaluation['predicted_output']['execution_correct']}")
+                    self.logger.info(f"Exact match: {evaluation['predicted_output']['exact_match']}")
+                    self.logger.info(f"Semantic equivalent: {evaluation['predicted_output'].get('semantic_equivalent')}")
+
+                else:
+                    # Failed to extract SQL
+                    self.logger.warning("Failed to extract SQL from model response")
+                    results.append({
+                        'instance': instance,
+                        'has_prediction': False,
+                        'predicted_output': {
+                            'sql': None,
+                            'raw_response': raw_response
+                        },
+                        'model': self.model_info
+                    })
+
+                    instance.inference_results = {
+                        'has_prediction': False,
+                        'model': self.model_info,
+                        'predicted_output': {
+                            'sql': None,
+                            'raw_response': raw_response
+                        }
+                    }
+
             except Exception as e:
                 # Handle errors
-                error_message = f"Model error: {str(e)}"
-                self.logger.warning(error_message)
-                raw_response = f"Error generating SQL: {error_message} from the model {self.model_info['model_name']}"
-                
-                # Update instance with error information
-                instance.inference_results = {
-                    'has_prediction': False,
-                    'model': self.model_info,
-                    'predicted_output': {
-                        'raw_response': raw_response
-                    }
-                }
-                
+                error_message = f"Error: {str(e)}"
+                self.logger.error(error_message)
+
                 results.append({
                     'instance': instance,
                     'has_prediction': False,
                     'predicted_output': {
                         'sql': None,
-                        'raw_response': raw_response
+                        'error': error_message
                     },
                     'model': self.model_info
                 })
-                self.logger.info("Failed to generate SQL from model response")
-                continue
 
-
-            # Extract SQL query from the raw response using the prompt template
-            generated_sql = self.prompt_template.extract_sql(raw_response)
-            
-            if generated_sql:
-                # Evaluate the generated SQL
-                evaluation = self.evaluate_instance(instance, generated_sql, file_path)
-                # Add model information
-                evaluation['model'] = self.model_info
-                results.append(evaluation)
-                
-                # 
-                existing_results = instance.inference_results if instance.inference_results else []
-                if not isinstance(existing_results, list):
-                    existing_results = [existing_results]
-
-                existing_results.append({
-                    'has_prediction': True,
-                    'model': self.model_info,
-                    'predicted_output': {
-                        'generated_sql': generated_sql,
-                        'execution_correct': evaluation['predicted_output']['execution_correct'],
-                        'execution_error': evaluation['predicted_output']['execution_error'],
-                        'exact_match': evaluation['predicted_output']['exact_match'],
-                        'semantic_equivalent': evaluation['predicted_output'].get('semantic_equivalent', None
-                        ),
-                        'semantic_explanation': evaluation['predicted_output'].get('semantic_explanation', ''),
-                        'raw_response': raw_response
-                    }
-                })
-
-                instance.inference_results = existing_results
-                
-                self.logger.info(f"Execution correct: {evaluation['predicted_output']['execution_correct']}")
-                self.logger.info(f"Exact match: {evaluation['predicted_output']['exact_match']}")
-                self.logger.info(f"Semantic equivalent: {evaluation['predicted_output'].get('semantic_equivalent', False)}")
-            else:
-                # Failed to extract SQL
-                failed_result = {
-                    'instance': instance,
-                    'has_prediction': False,
-                    'predicted_output': {
-                        'sql': None,
-                        'raw_response': raw_response
-                    },
-                    'model': self.model_info
-                }
-                results.append(failed_result)
-                
-                # Update the original instance data with failure information
                 instance.inference_results = {
                     'has_prediction': False,
                     'model': self.model_info,
                     'predicted_output': {
                         'sql': None,
-                        'raw_response': raw_response
+                        'error': error_message
                     }
                 }
-                
-                self.logger.info("Failed to extract SQL from model response")
-                
-            # Save the updated instance data to file
+
+            # Save updated instance
             if save_updated_files:
                 self._save_updated_instance(instance, file_path, output_dir)
-                
+
             self.logger.info("-" * 50)
-        
-        # Calculate overall metrics
+
+        # Calculate metrics
+        metrics = self._calculate_metrics(results)
+        self.logger.info(f"Prediction rate: {metrics['prediction_rate']:.2f}")
+        self.logger.info(f"Execution accuracy: {metrics['execution_accuracy']:.2f}")
+        self.logger.info(f"Exact match accuracy: {metrics['exact_match_accuracy']:.2f}")
+        self.logger.info(f"Semantic equivalence accuracy: {metrics['semantic_equivalent_accuracy']:.2f}")
+
+        return metrics
+
+    def _calculate_metrics(self, results: List[Dict]) -> Dict:
+        """Calculate evaluation metrics from results"""
         num_eval = len(results)
         num_with_prediction = sum(1 for r in results if r.get('has_prediction', False))
-        
-        # Only consider instances with valid predictions for accuracy metrics
-        exec_correct = sum(1 for r in results if r.get('has_prediction', False) and 
-                           r['predicted_output'].get('execution_correct', False))
-        exact_match = sum(1 for r in results if r.get('has_prediction', False) and 
-                          r['predicted_output'].get('exact_match', False))
-        semantic_equivalent = sum(1 for r in results if r.get('has_prediction', False) and 
-                                 r['predicted_output'].get('semantic_equivalent', False))
-        
-        metrics = {
+
+        exec_correct = sum(
+            1 for r in results
+            if r.get('has_prediction', False) and r['predicted_output'].get('execution_correct', False)
+        )
+
+        exact_match = sum(
+            1 for r in results
+            if r.get('has_prediction', False) and r['predicted_output'].get('exact_match', False)
+        )
+
+        semantic_equivalent = sum(
+            1 for r in results
+            if r.get('has_prediction', False) and r['predicted_output'].get('semantic_equivalent', False)
+        )
+
+        return {
             'num_evaluated': num_eval,
             'num_with_prediction': num_with_prediction,
             'prediction_rate': num_with_prediction / num_eval if num_eval > 0 else 0,
@@ -424,35 +480,21 @@ class Text2SQLInferencePipeline:
             'semantic_equivalent_accuracy': semantic_equivalent / num_with_prediction if num_with_prediction > 0 else 0,
             'model': self.model_info
         }
-        
-        self.logger.info(f"Prediction rate: {metrics['prediction_rate']:.2f}")
-        self.logger.info(f"Execution accuracy: {metrics['execution_accuracy']:.2f}")
-        self.logger.info(f"Exact match accuracy: {metrics['exact_match_accuracy']:.2f}")
-        self.logger.info(f"Semantic equivalence accuracy: {metrics['semantic_equivalent_accuracy']:.2f}")
-        
-        return metrics
-        
-    def _save_updated_instance(self, instance: DatasetInstance, original_file_path: str, output_dir: str = None):
-        """
-        Save the updated instance data back to a JSON file.
-        
-        Args:
-            instance: The updated DatasetInstance object
-            original_file_path: Path to the original JSON file
-            output_dir: Directory to save the updated file (if None, will update file in place)
-        """
+
+    def _save_updated_instance(
+        self,
+        instance: DatasetInstance,
+        original_file_path: str,
+        output_dir: Optional[str] = None
+    ):
+        """Save updated instance to JSON file"""
         if output_dir:
-            # Create output directory if it doesn't exist
             os.makedirs(output_dir, exist_ok=True)
-            
-            # Determine the new file path
             file_name = os.path.basename(original_file_path)
             new_file_path = os.path.join(output_dir, file_name)
         else:
-            # Update the file in place
             new_file_path = original_file_path
-        
-        # Convert instance to dictionary and save to file
+
         instance_dict = instance.to_dict()
         with open(new_file_path, 'w') as f:
             json.dump(instance_dict, f, indent=2)

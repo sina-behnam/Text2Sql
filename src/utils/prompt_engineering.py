@@ -1,279 +1,62 @@
 """
-Prompt Engineering Module for Text2SQL
+LangChain-based Prompt Engineering for Text2SQL
 
-This module provides a flexible, extensible system for creating model-specific
-prompts and extracting SQL queries from model responses.
-
-Design Pattern:
-- Base class (BasePromptTemplate) defines the interface
-- Specific implementations for different models
-- Registry pattern for easy model-to-template mapping
-- Factory pattern for retrieving the right template
-
-Usage:
-    # Use existing template
-    template = get_prompt_template("claude-3-5-sonnet-20241022")
-    system_msg, user_msg = template.create_prompt(question, schema)
-    sql = template.extract_sql(response)
-
-    # Create custom template for fine-tuned model
-    class MyFineTunedTemplate(BasePromptTemplate):
-        def create_prompt(self, question, schema, evidence=None, few_shot_examples=None):
-            # Custom implementation
-            pass
-
-        def extract_sql(self, response_text, clean=True):
-            # Custom implementation
-            pass
-
-    # Register it
-    register_prompt_template("my-finetuned-model", MyFineTunedTemplate)
+This module provides prompt templates and output parsers using LangChain components.
+Simplifies SQL generation and extraction with structured prompts and parsing.
 """
 
 import re
 import json
-from typing import Dict, List, Tuple, Optional
-from abc import ABC, abstractmethod
+from typing import Optional, Dict, Any
+
+from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain_core.output_parsers import BaseOutputParser, JsonOutputParser
+from langchain_core.exceptions import OutputParserException
 
 
-class BasePromptTemplate(ABC):
+class SQLOutputParser(BaseOutputParser[str]):
     """
-    Abstract base class for SQL prompt templates.
+    Custom LangChain output parser for extracting SQL from model responses.
 
-    This class defines the interface that all prompt templates must implement.
-    Extend this class to create custom prompt templates for specific models.
-
-    Attributes:
-        model_name: Name of the model this template is designed for
-        model_type: General type/family of the model (e.g., "anthropic", "openai")
+    Tries multiple extraction strategies:
+    1. JSON format with 'sql' field
+    2. Code blocks (```sql ... ```)
+    3. Direct SQL detection
     """
 
-    def __init__(self, model_name: str = "default", model_type: str = "default"):
-        """
-        Initialize the prompt template.
-
-        Args:
-            model_name: Specific model name (e.g., "claude-3-5-sonnet-20241022")
-            model_type: General model type (e.g., "anthropic", "openai")
-        """
-        self.model_name = model_name
-        self.model_type = model_type
-
-    @abstractmethod
-    def create_prompt(
-        self,
-        question: str,
-        schema: str,
-        evidence: Optional[str] = None,
-        few_shot_examples: Optional[List[Dict]] = None
-    ) -> Tuple[str, str]:
-        """
-        Create a model-specific prompt for SQL generation.
-
-        Args:
-            question: Natural language question to generate SQL for
-            schema: Database schema information
-            evidence: Additional evidence/context (optional)
-            few_shot_examples: List of example dicts with 'question', 'schema', 'sql' keys
-
-        Returns:
-            Tuple of (system_message, user_message)
-        """
-        pass
-
-    @abstractmethod
-    def extract_sql(self, response_text: str, clean: bool = True) -> str:
-        """
-        Extract SQL query from model response.
-
-        Args:
-            response_text: Raw text output from the model
-            clean: Whether to clean the extracted SQL (remove comments, whitespace)
-
-        Returns:
-            Extracted SQL query as a string, or empty string if extraction fails
-        """
-        pass
-
-    @staticmethod
-    def _is_valid_sql(text: str) -> bool:
-        """
-        Check if text looks like a valid SQL query.
-
-        Args:
-            text: Text to validate
-
-        Returns:
-            True if text appears to be valid SQL
-        """
-        if not text or len(text.strip()) < 5:
-            return False
-
-        text_upper = text.strip().upper()
-
-        # Must start with a SQL keyword
-        sql_keywords = ['SELECT', 'WITH', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP']
-        if not any(text_upper.startswith(kw) for kw in sql_keywords):
-            return False
-
-        # For SELECT queries, should have FROM (with some exceptions)
-        if text_upper.startswith('SELECT'):
-            # Allow SELECT without FROM for simple expressions (e.g., SELECT 1)
-            if 'FROM' not in text_upper and len(text) > 50:
-                return False
-
-        # Should not contain common non-SQL markers
-        non_sql_markers = ['PRINT', 'CONSOLE', 'ECHO', 'RETURN', 'FUNCTION', 'CLASS']
-        if any(marker in text_upper for marker in non_sql_markers):
-            return False
-
-        return True
-
-    @staticmethod
-    def _clean_sql(sql: str) -> str:
-        """
-        Clean extracted SQL query.
-
-        Args:
-            sql: Raw SQL query string
-
-        Returns:
-            Cleaned SQL query
-        """
-        if not sql:
-            return ""
-
-        # Remove SQL comments (-- style)
-        # sql = re.sub(r'--[^\n]*', '', sql) # for example : SELECT * FROM table -- this is a comment # ! It is better to keep inline comments for clarity, FOR NOW
-
-        # Remove SQL comments (/* */ style)
-        # sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL) # for example : SELECT /* comment */ * FROM table # ! It is better to keep inline comments for clarity, FOR NOW
-
-        # Remove extra whitespace
-        sql = re.sub(r'\s+', ' ', sql) 
-
-        # Remove leading/trailing whitespace
-        sql = sql.strip()
-
-        # Remove trailing semicolon if present
-        sql = sql.rstrip(';').strip()
-
-        return sql
-
-
-class DefaultPromptTemplate(BasePromptTemplate):
-    """Default prompt template for generic models."""
-
-    def __init__(self, model_name: str = "default"):
-        super().__init__(model_name, "default")
-
-    def create_prompt(
-        self,
-        question: str,
-        schema: str,
-        evidence: Optional[str] = None,
-        dialect: str = "SQL",
-    ) -> Tuple[str, str]:
-        """Create a default prompt."""
-        # Combine question with evidence
-        full_question = question
-        if evidence:
-            full_question = f"{question}\n\nAdditional Context: {evidence}"
-
-        system_message = (
-            """
-            You are a database expert generating SQL queries from natural language. 
-
-                SCHEMA FORMAT:
-                Each table is a dictionary with:
-                - table_name: string
-                - description: string (it can be empty)
-                - ddl: CREATE TABLE statement (string)
-            
-                REQUIREMENTS:
-                1. Generate valid SQL for the specified dialect (provide dialect in context)
-                2. Return JSON: {"sql": "query_string", "explanation": "brief rationale"}
-
-                EXAMPLE RESPONSE:
-                {
-                    "sql": "SELECT name FROM employees WHERE age > 30",
-                    "explanation": "Selects names of employees older than 30"
-                }
-            """
-        )
-
-        user_message = (
-            f"{full_question}\n\n"
-            f"Database schema (with {dialect} dialect ) :\n```\n{schema}\n```"
-        )
-
-        return system_message, user_message
-
-    def extract_sql(self, response_text: str, clean: bool = True) -> str:
-        """Extract SQL using common patterns."""
-        return self._extract_sql_generic(response_text, clean)
-
-    def _extract_sql_generic(self, text: str, clean: bool = True) -> str:
-        """
-        Generic SQL extraction method that can be used by subclasses.
-
-        This method tries multiple extraction strategies in order:
-        1. JSON format
-        2. Code blocks (markdown)
-        3. XML-style tags
-        4. Introductory phrases
-        5. Direct SQL pattern matching
-        """
+    def parse(self, text: str) -> str:
+        """Parse model output to extract SQL query"""
         if not text or not isinstance(text, str):
             return ""
 
-        # Step 1: Remove thinking tags
-        text = self._remove_thinking_tags(text)
+        # Try different extraction methods
+        sql = (
+            self._try_json_extraction(text)
+            or self._try_code_block_extraction(text)
+            or self._try_direct_sql_extraction(text)
+        )
 
-        sql_function_set = [self._try_json_extraction, 
-                            self._try_code_block_extraction,
-                            self._try_xml_extraction,
-                            self._try_intro_phrase_extraction,
-                            self._try_direct_sql_extraction]
-        
-        for func in sql_function_set:
-            sql = func(text)
-            if sql and self._is_valid_sql(sql):
-                return self._clean_sql(sql) if clean else sql
+        if sql and self._is_valid_sql(sql):
+            return self._clean_sql(sql)
 
         return ""
 
     @staticmethod
-    def _remove_thinking_tags(text: str) -> str:
-        """Remove thinking tags from text."""
-        # Remove <think>...</think> tags
-        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
-        # Remove orphaned tags
-        text = re.sub(r'</?think>', '', text, flags=re.IGNORECASE)
-        # Remove <thinking>...</thinking> tags
-        text = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL | re.IGNORECASE)
-        return text
-
-    @staticmethod
     def _try_json_extraction(text: str) -> str:
-        """Try to extract SQL from JSON format."""
-        json_patterns = [
+        """Extract SQL from JSON format"""
+        patterns = [
             r'\{[^{}]*"sql"\s*:\s*"([^"]*(?:\\.[^"]*)*)"[^{}]*\}',
-            r'\{[^{}]*\'sql\'\s*:\s*\'([^\']*(?:\\.[^\']*)*)\'[^{}]*\}',
             r'(\{[^{}]*"sql"[^{}]*\})',
         ]
 
-        for pattern in json_patterns:
+        for pattern in patterns:
             matches = re.finditer(pattern, text, re.DOTALL)
             for match in matches:
                 try:
                     if len(match.groups()) == 1 and not match.group(1).startswith('{'):
-                        # Direct SQL extraction
                         sql = match.group(1)
-                        sql = sql.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
-                        return sql
+                        return sql.replace('\\"', '"').replace('\\n', '\n')
                     else:
-                        # Full JSON object
                         json_str = match.group(1) if match.group(1).startswith('{') else match.group(0)
                         json_obj = json.loads(json_str)
                         if "sql" in json_obj and json_obj["sql"]:
@@ -284,7 +67,7 @@ class DefaultPromptTemplate(BasePromptTemplate):
 
     @staticmethod
     def _try_code_block_extraction(text: str) -> str:
-        """Try to extract SQL from code blocks."""
+        """Extract SQL from markdown code blocks"""
         patterns = [
             r'```sql\s*(.*?)```',
             r'```SQL\s*(.*?)```',
@@ -299,44 +82,11 @@ class DefaultPromptTemplate(BasePromptTemplate):
         return ""
 
     @staticmethod
-    def _try_xml_extraction(text: str) -> str:
-        """Try to extract SQL from XML-style tags."""
-        patterns = [
-            r'<sql>(.*?)</sql>',
-            r'<query>(.*?)</query>',
-            r'<SQL>(.*?)</SQL>',
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-            if match:
-                return match.group(1).strip()
-        return ""
-
-    @staticmethod
-    def _try_intro_phrase_extraction(text: str) -> str:
-        """Try to extract SQL after introductory phrases."""
-        patterns = [
-            r'(?:SQL query|query|SQL|answer):\s*["\']?(SELECT[\s\S]+?)(?:["\']?\s*(?:\n\n|$))',
-            r'(?:The SQL (?:query )?is|Here\'s the SQL|Generated SQL):\s*["\']?(SELECT[\s\S]+?)(?:["\']?\s*(?:\n\n|$))',
-            r'(?:Result|Output):\s*["\']?(SELECT[\s\S]+?)(?:["\']?\s*(?:\n\n|$))',
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-            if match:
-                return match.group(1).strip().strip('"\'')
-        return ""
-
-    @staticmethod
     def _try_direct_sql_extraction(text: str) -> str:
-        """Try to extract SQL directly from text."""
+        """Extract SQL directly from text"""
         patterns = [
             r'\b(SELECT\s+(?:DISTINCT\s+)?[\s\S]+?FROM\s+[\s\S]+?)(?:;|\n\n|$)',
             r'\b(WITH\s+[\s\S]+?SELECT\s+[\s\S]+?)(?:;|\n\n|$)',
-            r'\b(INSERT\s+INTO\s+[\s\S]+?)(?:;|\n\n|$)',
-            r'\b(UPDATE\s+[\s\S]+?SET\s+[\s\S]+?)(?:;|\n\n|$)',
-            r'\b(DELETE\s+FROM\s+[\s\S]+?)(?:;|\n\n|$)',
         ]
 
         for pattern in patterns:
@@ -347,103 +97,230 @@ class DefaultPromptTemplate(BasePromptTemplate):
                     return sql
         return ""
 
+    @staticmethod
+    def _is_valid_sql(text: str) -> bool:
+        """Check if text looks like valid SQL"""
+        if not text or len(text.strip()) < 5:
+            return False
 
-class PromptTemplateRegistry:
+        text_upper = text.strip().upper()
+        sql_keywords = ['SELECT', 'WITH', 'INSERT', 'UPDATE', 'DELETE']
+        return any(text_upper.startswith(kw) for kw in sql_keywords)
+
+    @staticmethod
+    def _clean_sql(sql: str) -> str:
+        """Clean extracted SQL query"""
+        if not sql:
+            return ""
+
+        # Remove extra whitespace
+        sql = re.sub(r'\s+', ' ', sql)
+        # Remove trailing semicolon
+        sql = sql.strip().rstrip(';').strip()
+
+        return sql
+
+
+class Text2SQLPromptTemplate:
     """
-    Registry for managing prompt templates.
+    LangChain prompt template for Text2SQL generation.
 
-    This class maintains a mapping of model names to their corresponding
-    prompt template classes, allowing for easy lookup and extension.
+    Creates structured prompts for SQL generation from natural language questions.
     """
 
-    _registry: Dict[str, type] = {}
-    _default_templates: Dict[str, type] = {
-        "default": DefaultPromptTemplate
-    } 
-
-    @classmethod
-    def register(cls, model_name: str, template_class: type):
+    def __init__(self, dialect: str = "SQL"):
         """
-        Register a custom prompt template for a model.
+        Initialize prompt template.
 
         Args:
-            model_name: Name or identifier of the model
-            template_class: Class that extends BasePromptTemplate
-
-        Raises:
-            ValueError: If template_class doesn't extend BasePromptTemplate
+            dialect: SQL dialect (e.g., "SQLite", "PostgreSQL", "MySQL")
         """
-        if not issubclass(template_class, BasePromptTemplate):
-            raise ValueError(
-                f"Template class must extend BasePromptTemplate, got {template_class}"
-            )
-        cls._registry[model_name] = template_class
+        self.dialect = dialect
+        self._build_prompt()
 
-    @classmethod
-    def get(cls, model_name: str) -> BasePromptTemplate:
+    def _build_prompt(self):
+        """Build the LangChain prompt template"""
+        system_template = """You are an expert SQL query generator. Your task is to convert natural language questions into valid {dialect} queries.
+
+IMPORTANT INSTRUCTIONS:
+1. Generate syntactically correct {dialect} queries
+2. Use the provided database schema information
+3. Consider any additional context or evidence provided
+4. Return your response in JSON format with 'sql' and 'explanation' fields
+
+SCHEMA FORMAT:
+Each table includes:
+- table_name: Name of the table
+- description: Description of the table (may be empty)
+- ddl: CREATE TABLE statement
+
+RESPONSE FORMAT (JSON):
+{{
+    "sql": "your SQL query here",
+    "explanation": "brief explanation of the query logic"
+}}
+
+Example response:
+{{
+    "sql": "SELECT name FROM employees WHERE age > 30",
+    "explanation": "Retrieves names of all employees older than 30"
+}}
+"""
+
+        human_template = """Question: {question}
+
+Database Schema ({dialect}):
+```
+{schema}
+```
+{evidence}
+
+Generate the SQL query in JSON format."""
+
+        self.prompt = ChatPromptTemplate.from_messages([
+            SystemMessagePromptTemplate.from_template(system_template),
+            HumanMessagePromptTemplate.from_template(human_template)
+        ])
+
+    def format_prompt(
+        self,
+        question: str,
+        schema: str,
+        evidence: Optional[str] = None
+    ) -> ChatPromptTemplate:
         """
-        Get a prompt template instance for a model.
+        Format the prompt with the given inputs.
 
         Args:
-            model_name: Name of the model
+            question: Natural language question
+            schema: Database schema information
+            evidence: Additional context/evidence (optional)
 
         Returns:
-            Instance of the appropriate prompt template class
+            Formatted ChatPromptTemplate
         """
-        # First, check custom registry
-        if model_name in cls._registry:
-            return cls._registry[model_name](model_name)
-        else:
-            print(f"No custom template found for model '{model_name}', using default.")
-        # Otherwise, return default
-        return DefaultPromptTemplate(model_name)
+        evidence_text = f"\nAdditional Context:\n{evidence}" if evidence else ""
 
-    @classmethod
-    def list_registered(cls) -> List[str]:
-        """
-        List all registered model names.
-
-        Returns:
-            List of registered model names
-        """
-        all_models = set(cls._default_templates.keys()) | set(cls._registry.keys())
-        return sorted(list(all_models))
+        return self.prompt.partial(
+            dialect=self.dialect,
+            question=question,
+            schema=schema,
+            evidence=evidence_text
+        )
 
 
-# Convenience functions
-def get_prompt_template(model_name: str) -> BasePromptTemplate:
+class SemanticEquivalencePromptTemplate:
     """
-    Get a prompt template instance for a model.
+    LangChain prompt template for checking semantic equivalence of SQL queries.
+    """
+
+    def __init__(self):
+        """Initialize semantic equivalence prompt template"""
+        self._build_prompt()
+
+    def _build_prompt(self):
+        """Build the LangChain prompt template"""
+        system_template = """You are a SQL expert tasked with determining if two SQL queries are semantically equivalent.
+
+Semantically equivalent means the queries would return the same results on the same database, even if they differ syntactically.
+
+ACCEPTABLE DIFFERENCES:
+- Column ordering in SELECT statements
+- Presence/absence of column aliases (AS)
+- Formatting, spacing, capitalization
+- Quote styles around identifiers
+- Simple condition reordering (when logically equivalent)
+
+RESPONSE FORMAT (JSON):
+{{
+    "equivalent": true/false,
+    "explanation": "brief explanation of your judgment"
+}}
+"""
+
+        human_template = """Question: {question}
+
+Ground Truth SQL:
+```sql
+{ground_truth_sql}
+```
+
+Generated SQL:
+```sql
+{predicted_sql}
+```
+
+Are these two SQL queries semantically equivalent? Respond in JSON format."""
+
+        self.prompt = ChatPromptTemplate.from_messages([
+            SystemMessagePromptTemplate.from_template(system_template),
+            HumanMessagePromptTemplate.from_template(human_template)
+        ])
+
+    def format_prompt(
+        self,
+        question: str,
+        ground_truth_sql: str,
+        predicted_sql: str
+    ) -> ChatPromptTemplate:
+        """
+        Format the prompt for semantic equivalence checking.
+
+        Args:
+            question: Original natural language question
+            ground_truth_sql: Expected SQL query
+            predicted_sql: Generated SQL query
+
+        Returns:
+            Formatted ChatPromptTemplate
+        """
+        return self.prompt.partial(
+            question=question,
+            ground_truth_sql=ground_truth_sql,
+            predicted_sql=predicted_sql
+        )
+
+
+def create_sql_generation_chain(llm, dialect: str = "SQL"):
+    """
+    Create a LangChain chain for SQL generation.
 
     Args:
-        model_name: Name of the model
+        llm: LangChain LLM instance
+        dialect: SQL dialect
 
     Returns:
-        Instance of the appropriate prompt template class
-
-    Example:
-        >>> template = get_prompt_template("arctic_text2sql_R1")
-        >>> system_msg, user_msg = template.create_prompt("Get all users", schema)
+        Runnable chain: prompt | llm | parser
     """
-    return PromptTemplateRegistry.get(model_name)
+    from langchain_core.runnables import RunnablePassthrough
+
+    prompt_template = Text2SQLPromptTemplate(dialect)
+    parser = SQLOutputParser()
+
+    # Create the chain using LCEL (LangChain Expression Language)
+    # This is a simple chain: we'll format the prompt manually and pass to LLM
+    return {
+        "prompt_template": prompt_template,
+        "llm": llm,
+        "parser": parser
+    }
 
 
-def register_prompt_template(model_name: str, template_class: type):
+def create_semantic_equivalence_chain(llm):
     """
-    Register a custom prompt template for a model.
+    Create a LangChain chain for semantic equivalence checking.
 
     Args:
-        model_name: Name or identifier of the model
-        template_class: Class that extends BasePromptTemplate
+        llm: LangChain LLM instance
 
-    Example:
-        >>> class MyCustomTemplate(BasePromptTemplate):
-        ...     def create_prompt(self, question, schema, evidence=None, few_shot_examples=None):
-        ...         # Custom implementation
-        ...         pass
-        ...     def extract_sql(self, response_text, clean=True):
-        ...         # Custom implementation
-        ...         pass
-        >>> register_prompt_template("my-model", MyCustomTemplate)
+    Returns:
+        Runnable chain: prompt | llm | parser
     """
-    PromptTemplateRegistry.register(model_name, template_class)
+    prompt_template = SemanticEquivalencePromptTemplate()
+    parser = JsonOutputParser()
+
+    return {
+        "prompt_template": prompt_template,
+        "llm": llm,
+        "parser": parser
+    }
