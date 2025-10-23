@@ -10,6 +10,97 @@ from typing import Dict, List, Optional, Tuple, Any, Union
 from pathlib import Path
 from dataclasses import dataclass, asdict
 
+def get_db_connection(instance, instance_path: str = None, snowflake_creds: Dict[str, str] = None):
+    """Get database connection based on type"""
+    database_info = instance.database
+    db_type = database_info.get('type', 'sqlite').lower()
+    if db_type == 'sqlite' and instance.dataset != 'spider2-lite':
+        db_name = database_info['name']
+        db_file = database_info['path'][0].split('/')[-1]  # Get the last part of the path
+        database_path = os.path.join(os.path.dirname(instance_path),'databases', db_name,  db_file)
+        return sqlite3.connect(database_path), 'sqlite'
+    elif db_type == 'sqlite' and instance.dataset == 'spider2-lite':
+        db_file = database_info['path'][0]
+        database_path = os.path.join(os.path.dirname(instance_path), db_file)
+        return sqlite3.connect(database_path), 'sqlite'
+    elif db_type == 'snowflake':
+        # Load credentials
+        try:
+            import snowflake.connector
+        except ImportError:
+            raise ImportError("snowflake-connector-python is not installed. Please install it to use Snowflake databases.")
+        conn = snowflake.connector.connect(
+            database=database_info['name'],
+            **snowflake_creds
+        )
+        return conn, 'snowflake'
+    else:
+        raise ValueError(f"Unsupported database type: {db_type}")
+    
+def check_sql_semantic_equivalence(model_provider,predicted_sql: str, ground_truth_sql: str, 
+                                  question: str) -> Tuple[bool, str]:
+        """
+        Use the configured model to determine if two SQL queries are semantically equivalent,
+        even if they have syntactic differences.
+        
+        Args:
+            model_provider: The model provider instance to use for generation
+            predicted_sql: Predicted SQL query
+            ground_truth_sql: Ground truth SQL query
+            question: The original natural language question
+            
+        Returns:
+            Tuple of (is_equivalent, explanation)
+        """
+        # Create system message for the judge
+        system_message = (
+            "You are a SQL expert tasked with determining if two SQL queries are semantically equivalent. "
+            "This means they may have syntactic differences but would return the same results when executed "
+            "on the same database. Common acceptable differences include: "
+            "- Different column ordering in SELECT statements "
+            "- Presence or absence of column aliases (AS) "
+            "- Different formatting, spacing, or capitalization "
+            "- Use of quotes around identifiers "
+            "- Simple reordering of conditions that doesn't change the logic "
+            "\n\nYour response must be in JSON format with two fields: "
+            "'equivalent' (true/false) and 'explanation' (a brief explanation of your judgment)."
+        )
+        
+        # Create user message
+        user_message = (
+            f"Question: {question}\n\n"
+            f"Gold SQL Query: {ground_truth_sql}\n\n"
+            f"Generated SQL Query: {predicted_sql}\n\n"
+            "Are these two SQL queries semantically equivalent? Provide your judgment."
+        )
+        
+        try:
+            # Generate response using the configured model provider
+            raw_response = model_provider.generate(system_message, user_message)
+            
+            # Try to extract JSON
+            json_match = re.search(r'(\{.*\})', raw_response, re.DOTALL)
+            if json_match:
+                try:
+                    json_obj = json.loads(json_match.group(1))
+                    if "equivalent" in json_obj:
+                        return json_obj["equivalent"], json_obj.get("explanation", "")
+                except json.JSONDecodeError:
+                    pass
+            
+            # If JSON extraction fails, look for yes/no in the response
+            if re.search(r'\b(yes|equivalent|same|equal)\b', raw_response, re.IGNORECASE):
+                return True, "Model indicated equivalence but didn't provide structured output"
+            elif re.search(r'\b(no|not equivalent|different|not the same)\b', raw_response, re.IGNORECASE):
+                return False, "Model indicated non-equivalence but didn't provide structured output"
+            
+            # Default to relying on execution results
+            return False, "Could not determine semantic equivalence from model response"
+        
+        except Exception as e:
+            # If the model call fails, default to relying on execution results
+            return False, f"Error in semantic check: {str(e)}"
+
 def check_execution_accuracy_2(
     predicted_sql: str, 
     ground_truth_sql: str,

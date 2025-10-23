@@ -10,12 +10,6 @@ from datetime import datetime
 import logging
 from tqdm import tqdm
 
-# Add this import at the top
-try:
-    import snowflake.connector
-    HAS_SNOWFLAKE = True
-except ImportError:
-    HAS_SNOWFLAKE = False
 
 from src.dataloader import DatasetInstance
 from src.models import (
@@ -26,7 +20,9 @@ from src.models import (
 
 from src.utils.utils import (
                         check_exact_match,
-                        check_execution_accuracy_2
+                        check_execution_accuracy_2,
+                        get_db_connection,
+                        check_sql_semantic_equivalence
                         )
 
 from src.utils.prompt_engineering import get_prompt_template
@@ -83,6 +79,12 @@ class Text2SQLInferencePipeline:
         self.prompt_template = get_prompt_template(prompt_template_key)  # Replace 'default' with your desired template key
         self.logger.info(f"Using prompt template: {self.prompt_template.__class__.__name__}")
 
+        # Add this import at the top
+        try:
+            import snowflake.connector
+        except ImportError:
+            self.logger.warning("snowflake-connector-python is not installed. Snowflake connections will not work.")
+
     def _init_model_provider(self):
         """Initialize the model provider based on the configuration"""
         model_type = self.model_config.get("type", "together_ai").lower()
@@ -113,100 +115,7 @@ class Text2SQLInferencePipeline:
             "param_config" : self.model_config.get("param_config"),
             "timestamp": datetime.now().isoformat()
         }
-    
-    def check_sql_semantic_equivalence(self, predicted_sql: str, ground_truth_sql: str, 
-                                  question: str) -> Tuple[bool, str]:
-        """
-        Use the configured model to determine if two SQL queries are semantically equivalent,
-        even if they have syntactic differences.
         
-        Args:
-            predicted_sql: Predicted SQL query
-            ground_truth_sql: Ground truth SQL query
-            question: The original natural language question
-            
-        Returns:
-            Tuple of (is_equivalent, explanation)
-        """
-        # Create system message for the judge
-        system_message = (
-            "You are a SQL expert tasked with determining if two SQL queries are semantically equivalent. "
-            "This means they may have syntactic differences but would return the same results when executed "
-            "on the same database. Common acceptable differences include: "
-            "- Different column ordering in SELECT statements "
-            "- Presence or absence of column aliases (AS) "
-            "- Different formatting, spacing, or capitalization "
-            "- Use of quotes around identifiers "
-            "- Simple reordering of conditions that doesn't change the logic "
-            "\n\nYour response must be in JSON format with two fields: "
-            "'equivalent' (true/false) and 'explanation' (a brief explanation of your judgment)."
-        )
-        
-        # Create user message
-        user_message = (
-            f"Question: {question}\n\n"
-            f"Gold SQL Query: {ground_truth_sql}\n\n"
-            f"Generated SQL Query: {predicted_sql}\n\n"
-            "Are these two SQL queries semantically equivalent? Provide your judgment."
-        )
-        
-        try:
-            # Generate response using the configured model provider
-            raw_response = self.model_provider.generate(system_message, user_message)
-            
-            # Try to extract JSON
-            json_match = re.search(r'(\{.*\})', raw_response, re.DOTALL)
-            if json_match:
-                try:
-                    json_obj = json.loads(json_match.group(1))
-                    if "equivalent" in json_obj:
-                        return json_obj["equivalent"], json_obj.get("explanation", "")
-                except json.JSONDecodeError:
-                    pass
-            
-            # If JSON extraction fails, look for yes/no in the response
-            if re.search(r'\b(yes|equivalent|same|equal)\b', raw_response, re.IGNORECASE):
-                return True, "Model indicated equivalence but didn't provide structured output"
-            elif re.search(r'\b(no|not equivalent|different|not the same)\b', raw_response, re.IGNORECASE):
-                return False, "Model indicated non-equivalence but didn't provide structured output"
-            
-            # Default to relying on execution results
-            return False, "Could not determine semantic equivalence from model response"
-        
-        except Exception as e:
-            # If the model call fails, default to relying on execution results
-            return False, f"Error in semantic check: {str(e)}"
-                    
-    def get_db_connection(self, instance: DatasetInstance, instance_path: str = None):
-        """Get database connection based on type"""
-        database_info = instance.database
-        db_type = database_info.get('type', 'sqlite').lower()
-
-        if db_type == 'sqlite' and instance.dataset != 'spider2-lite':
-            db_name = database_info['name']
-            db_file = database_info['path'][0].split('/')[-1]  # Get the last part of the path
-            database_path = os.path.join(os.path.dirname(instance_path),'databases', db_name,  db_file)
-            return sqlite3.connect(database_path), 'sqlite'
-        
-        elif db_type == 'sqlite' and instance.dataset == 'spider2-lite':
-            db_file = database_info['path'][0]
-            database_path = os.path.join(os.path.dirname(instance_path), db_file)
-            return sqlite3.connect(database_path), 'sqlite'
-
-        elif db_type == 'snowflake':
-            if not HAS_SNOWFLAKE:
-                raise ImportError("Install snowflake-connector-python")
-
-            # Load credentials
-            conn = snowflake.connector.connect(
-                database=database_info['name'],
-                **self.creds
-            )
-            return conn, 'snowflake'
-
-        else:
-            raise ValueError(f"Unsupported database type: {db_type}")
-    
     def evaluate_instance(self, instance: DatasetInstance, generated_sql: str, instance_path: str) -> Dict:
         """
         Evaluate the generated SQL query against the ground truth.
@@ -221,7 +130,7 @@ class Text2SQLInferencePipeline:
         """
         
         # Get database connection
-        db_connection, db_type = self.get_db_connection(instance, instance_path)
+        db_connection, db_type = get_db_connection(instance, instance_path)
         
         # Check execution accuracy
         exec_correct, exec_error = check_execution_accuracy_2(
@@ -252,7 +161,7 @@ class Text2SQLInferencePipeline:
         else:
             # Otherwise, use the model to check semantic equivalence
             # This catches cases with no exact match, incorrect execution, but no specific error
-            semantic_equivalent, semantic_explanation = self.check_sql_semantic_equivalence(
+            semantic_equivalent, semantic_explanation = check_sql_semantic_equivalence(
                 generated_sql, instance.sql, instance.question
             )
         
