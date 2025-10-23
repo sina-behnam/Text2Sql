@@ -106,8 +106,11 @@ class BasePromptTemplate(ABC):
         Returns:
             True if text appears to be valid SQL
         """
-        if not text or len(text.strip()) < 5:
+        if not text or not isinstance(text, str):
             return False
+        
+        if len(text.strip()) < 5:
+            return False 
 
         text_upper = text.strip().upper()
 
