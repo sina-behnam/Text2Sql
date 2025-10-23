@@ -6,8 +6,8 @@ import os
 # model_name = "HuggingFaceTB/SmolLM3-3B"
 # local_dir = "./models/SmolLM3-3B"
 
-model_name = "Qwen/Qwen2.5-Coder-1.5B"
-local_dir = "./models/Qwen2.5-Coder-1.5B"
+model_name = "hkunlp/from_all_T5_base_prefix_spider_with_cell_value2"
+local_dir = "./models/UnifiedSKG"
 
 # Step 1: Download the model explicitly
 print("Downloading model...")
