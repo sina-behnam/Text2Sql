@@ -130,7 +130,7 @@ class Text2SQLInferencePipeline:
         """
         
         # Get database connection
-        db_connection, db_type = get_db_connection(instance, instance_path)
+        db_connection, db_type = get_db_connection(instance, instance_path, self.creds)
         
         # Check execution accuracy
         exec_correct, exec_error = check_execution_accuracy_2(
@@ -162,7 +162,7 @@ class Text2SQLInferencePipeline:
             # Otherwise, use the model to check semantic equivalence
             # This catches cases with no exact match, incorrect execution, but no specific error
             semantic_equivalent, semantic_explanation = check_sql_semantic_equivalence(
-                generated_sql, instance.sql, instance.question
+                self.model_provider,generated_sql, instance.sql, instance.question
             )
         
         # Close database connection
