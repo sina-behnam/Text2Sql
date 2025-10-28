@@ -2,26 +2,40 @@ import os
 from typing import Dict, List, Tuple, Any, Optional, Union
 import openai
 import torch
-# Optional import for Anthropic API
-try:
-    from anthropic import Anthropic, NOT_GIVEN
-    HAS_ANTHROPIC = True
-except ImportError:
-    HAS_ANTHROPIC = False
+from pydantic import BaseModel, Field
 
-# Optional imports for local models
-try:
-    from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-    HAS_TRANSFORMERS = True
-except ImportError:
-    HAS_TRANSFORMERS = False
+class ModelConfig(BaseModel):
+    """Base model configuration"""
+    seed: int = Field(default=42, description="Random seed for reproducibility")
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="Sampling temperature")
+    top_p: float = Field(default=0.95, ge=0.0, le=1.0, description="Nucleus sampling probability")
+    max_tokens: int = Field(default=1024, gt=0, description="Maximum tokens to generate")
+    frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0, description="Frequency penalty")
+    presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0, description="Presence penalty")
 
-# Set your API key
-API_KEY = 'your_api_key_here'
-os.environ["TOGETHER_API_KEY"] = API_KEY
+    class Config:
+        frozen = True
+        extra = "forbid"
+
+class TogetherAIConfig(ModelConfig):
+    """Configuration for Together.ai models"""
+    total_limit: int = Field(default=8193, gt=0, description="Total token limit for the model")
 
 class ModelProvider:
-    """Base class for model providers (API or local)"""
+    """Base class with config as class attribute"""
+    config_class = ModelConfig  # Override in subclasses
+    
+    def __init__(self, model_name: str, config: Optional[ModelConfig] = None, **config_kwargs):
+        self.model_name = model_name
+        
+        # Use provided config, or create from kwargs, or use defaults
+        if config is not None:
+            self.config = config
+        elif config_kwargs:
+            self.config = self.config_class(**config_kwargs)
+        else:
+            self.config = self.config_class()  # Use defaults
+
     
     def generate(self, system_message: str, user_message: str) -> str:
         """
@@ -35,23 +49,15 @@ class ModelProvider:
             Model's response as a string
         """
         raise NotImplementedError("Subclasses must implement this method")
-
-class TogetherAIProvider(ModelProvider):
-    """Provider for Together.ai API-based models"""
     
-    def __init__(self, model_name: str, api_key: str = None, param_config : Dict = None):
-        """
-        Initialize the Together.ai provider.
-        
-        Args:
-            model_name: Name of the model to use
-            api_key: API key for Together.ai
-        """
-        self.model_name = model_name
-        self.api_key = api_key or os.getenv("TOGETHER_API_KEY", API_KEY)
-        self.total_limit = 8193  # Actual Together.ai limit
-        self.param_config = param_config or {}
-        
+class TogetherAIProvider(ModelProvider):
+    config_class = TogetherAIConfig  # Override!
+    
+    def __init__(self, model_name: str, api_key: str = None, config: Optional[TogetherAIConfig] = None, **config_kwargs):
+        super().__init__(model_name, config=config, **config_kwargs)
+        self.api_key = api_key or os.getenv("TOGETHER_API_KEY")
+        # Now use self.config.temperature, self.config.total_limit, etc.
+
         # Initialize OpenAI client with Together.ai API
         self.client = openai.OpenAI(
             api_key=self.api_key,
@@ -71,7 +77,7 @@ class TogetherAIProvider(ModelProvider):
         """
         input_text = system_message + user_message
         estimated_input_tokens = len(input_text) // 4  # rough estimate
-        max_tokens = self.param_config.get("max_tokens", 1024)
+        max_tokens = self._model_param.max_tokens
         # Leave buffer and adjust max_tokens if needed
         available_tokens = 8100 - estimated_input_tokens - 100  # 100 token buffer
         actual_max_tokens = min(max_tokens, available_tokens)
@@ -84,144 +90,14 @@ class TogetherAIProvider(ModelProvider):
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": user_message},
             ],
-            temperature=self.param_config.get("temperature", 0.7),
-            top_p=self.param_config.get("top_p", 0.95),
-            frequency_penalty=self.param_config.get("frequency_penalty", 0.0),
-            presence_penalty=self.param_config.get("presence_penalty", 0.0)
-        )
-        
-        return response.choices[0].message.content
-
-class OpenAIProvider(ModelProvider):
-    """Provider for OpenAI API-based models"""
-    
-    def __init__(self, model_name: str, api_key: str = None, param_config : Dict = None):
-        """
-        Initialize the OpenAI provider.
-        
-        Args:
-            model_name: Name of the model to use
-            api_key: API key for OpenAI
-        """
-        self.model_name = model_name
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.param_config = param_config or {}
-        
-        # Initialize OpenAI client
-        self.client = openai.OpenAI(
-            api_key=self.api_key
-        )
-    
-    def generate(self, system_message: str, user_message: str) -> str:
-        """
-        Generate a response using the OpenAI API.
-        
-        Args:
-            system_message: System message to guide the model's behavior
-            user_message: User message with the actual prompt
-            
-        Returns:
-            Model's response as a string
-        """
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=self.param_config.get("temperature", 0.7),
-            top_p=self.param_config.get("top_p", 0.95),
-            frequency_penalty=self.param_config.get("frequency_penalty", 0.0),
-            presence_penalty=self.param_config.get("presence_penalty", 0.0)
+            temperature=self._model_param.temperature,
+            top_p=self._model_param.top_p,
+            frequency_penalty=self._model_param.frequency_penalty,
+            presence_penalty=self._model_param.presence_penalty,
         )
         
         return response.choices[0].message.content
     
-class AnthropicProvider(ModelProvider):
-    """Provider for Anthropic API models (Claude)"""
-    
-    def __init__(self, model_name: str = "claude-3-opus-20240229", api_key: str = None, max_tokens: int = 1024, extended_thinking: bool = False):
-        """
-        Initialize the Anthropic provider.
-        
-        Args:
-            model_name: Name of the Claude model to use (e.g., "claude-3-opus-20240229")
-            api_key: API key for Anthropic
-            max_tokens: Maximum number of tokens to generate
-        """
-        if not HAS_ANTHROPIC:
-            raise ImportError(
-                "To use Anthropic models, you need to install the anthropic package: "
-                "pip install anthropic"
-            )
-            
-        self.model_name = model_name
-        self.api_key = api_key 
-        self.max_tokens = max_tokens
-        self.extended_thinking = extended_thinking
-        
-        if not self.api_key:
-            raise ValueError(
-                "Anthropic API key is required. Please provide it as a parameter "
-                "or set the ANTHROPIC_API_KEY environment variable."
-            )
-        
-        # Initialize Anthropic client
-        self.client = Anthropic(api_key=self.api_key)
-
-    @staticmethod
-    def get_output_response(response):
-        thinking_messages = None
-        response_messages = None
-
-        for block in response.content:
-            if block.type == "thinking":
-                thinking_messages = block.thinking
-            elif block.type == "redacted_thinking":
-                thinking_messages = 'IT IS REDACTED'
-            elif block.type == "text":
-                response_messages = block.text
-
-        message = f'<think>\n{thinking_messages}\n</think>\n\n' if thinking_messages else ''
-        message += response_messages
-
-        return message
-    
-    def generate(self, system_message: str, user_message: str) -> str:
-        """
-        Generate a response using the Anthropic API.
-        
-        Args:
-            system_message: System message to guide the model's behavior
-            user_message: User message with the actual prompt
-            
-        Returns:
-            Model's response as a string
-        """
-        try:
-            # Create message using Anthropic API format
-            response = self.client.messages.create(
-                model=self.model_name,
-                system=system_message,
-                thinking={
-                    "type": "enabled",
-                    "budget_tokens": 2000,
-                } if self.extended_thinking else NOT_GIVEN,
-                messages=[
-                    {"role": "user", "content": user_message},
-                ],
-                max_tokens= 4000 if self.extended_thinking else 1024, # It always should be higher than the budget tokens for thinking
-            )
-            
-            # Extract the response message
-            return AnthropicProvider.get_output_response(response)
-    
-        except Exception as e:
-            # Handle API errors
-            error_message = f"Anthropic API error: {str(e)}"
-            print(error_message)
-            return error_message
-
 class LocalHuggingFaceProvider(ModelProvider):
     """Improved provider for local HuggingFace models with proper configuration"""
     
@@ -237,6 +113,16 @@ class LocalHuggingFaceProvider(ModelProvider):
             trust_remote_code: Whether to trust remote code
             extended_thinking: Enable Chain-of-Thought reasoning
         """
+
+                # Optional imports for local models
+        try:
+            from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+        except ImportError:
+            raise ImportError(
+                "To use local HuggingFace models, you need to install the transformers package: "
+                "pip install transformers"
+            )
+
         self.model_path = model_path
         self.max_new_tokens = max_new_tokens
         self.extended_thinking = extended_thinking
