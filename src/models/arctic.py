@@ -9,7 +9,7 @@ class ArcticConfig(ModelConfig):
     tensor_parallel_size: int = Field(default=1, description="Tensor parallel size for vLLM")
     dtype: str = Field(default="float16", description="Data type for model weights")
     max_model_len: int = Field(default=8192, description="Maximum model context length")
-    stop_sequences: list[str] = Field(default_factory=lambda: ["</answer>"])
+    stop_sequences: list[str] = Field(default_factory=lambda: ["</answer>", "<|im_end|>", "<|endoftext|>"])
 
 
 class ArcticText2SQLInference(ModelProvider):
@@ -63,12 +63,16 @@ class ArcticText2SQLInference(ModelProvider):
             {"role": "assistant", "content": assistant_prefix}
         ]
 
-        prompt = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=False
-        )
-        
+        # Manually format to Qwen2.5 chat format
+        prompt_parts = []
+        for message in messages:
+            role = message["role"]
+            content = message["content"]
+            prompt_parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
+
+        # Join all parts
+        prompt = "\n".join(prompt_parts)
+            
         return prompt
 
     def generate(self,system_message, user_message, assistant_prefix):
