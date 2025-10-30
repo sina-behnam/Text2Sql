@@ -73,10 +73,11 @@ class ArcticText2SQLTemplate(BasePromptTemplate):
         sql_function_set = [extractor._try_code_block_extraction,
                             extractor._try_direct_sql_extraction]
         
-        sql = extractor._try_extraction_methods(sql_function_set, response_text)
-        if sql and extractor._is_valid_sql(sql):
-            return extractor._clean_sql(sql) if clean else sql
-        
+        for func in sql_function_set:
+            sql = func(response_text)
+            if sql and self._is_valid_sql(sql):
+                return self._clean_sql(sql)
+            
         
         return ""
     
