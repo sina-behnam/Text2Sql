@@ -38,7 +38,7 @@ def get_db_connection(instance, instance_path: str = None, snowflake_creds: Dict
         raise ValueError(f"Unsupported database type: {db_type}")
     
 def check_sql_semantic_equivalence(model_provider,predicted_sql: str, ground_truth_sql: str, 
-                                  question: str) -> Tuple[bool, str]:
+                                  question: str,api_key:str) -> Tuple[bool, str]:
         """
         Use the configured model to determine if two SQL queries are semantically equivalent,
         even if they have syntactic differences.
@@ -52,19 +52,6 @@ def check_sql_semantic_equivalence(model_provider,predicted_sql: str, ground_tru
         Returns:
             Tuple of (is_equivalent, explanation)
         """
-        # Create system message for the judge
-        system_message = (
-            "You are a SQL expert tasked with determining if two SQL queries are semantically equivalent. "
-            "This means they may have syntactic differences but would return the same results when executed "
-            "on the same database. Common acceptable differences include: "
-            "- Different column ordering in SELECT statements "
-            "- Presence or absence of column aliases (AS) "
-            "- Different formatting, spacing, or capitalization "
-            "- Use of quotes around identifiers "
-            "- Simple reordering of conditions that doesn't change the logic "
-            "\n\nYour response must be in JSON format with two fields: "
-            "'equivalent' (true/false) and 'explanation' (a brief explanation of your judgment)."
-        )
         
         # Create user message
         user_message = (
@@ -76,7 +63,7 @@ def check_sql_semantic_equivalence(model_provider,predicted_sql: str, ground_tru
         
         try:
             # Generate response using the configured model provider
-            raw_response = model_provider.generate(system_message, user_message)
+            raw_response = model_provider.judge(user_message,api_key=api_key)
             
             # Try to extract JSON
             json_match = re.search(r'(\{.*\})', raw_response, re.DOTALL)

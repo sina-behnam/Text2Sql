@@ -148,7 +148,7 @@ class BasePromptTemplate(ABC):
         return self.assistant_message
 
     @abstractmethod
-    def create_prompt(self, question:str, schema:str, dialect:str, evidence:str = None) -> Tuple[str, str] | Tuple[str, str, str]:
+    def create_prompt(self, question:str, schema:str, dialect:str, evidence:str = None) -> Tuple[str, str, str]:
         """
         Create a model-specific prompt for SQL generation.
         Args:
@@ -160,7 +160,7 @@ class BasePromptTemplate(ABC):
         Returns:
             Tuple of (system_message, user_message) or (system_message, user_message, assistant_message)
         """
-        return (self.system_message, self.user_message, self.assistant_message) if self.assistant_message else (self.system_message, self.user_message)
+        return self.system_message, self.user_message, self.assistant_message
 
     @abstractmethod
     def extract_sql(self, response_text: str, clean: bool = True) -> str:

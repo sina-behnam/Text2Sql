@@ -4,6 +4,19 @@ import openai
 import torch
 from pydantic import BaseModel, Field
 
+JUDGE_SYSTEM_MESSAGE = (
+            "You are a SQL expert tasked with determining if two SQL queries are semantically equivalent. "
+            "This means they may have syntactic differences but would return the same results when executed "
+            "on the same database. Common acceptable differences include: "
+            "- Different column ordering in SELECT statements "
+            "- Presence or absence of column aliases (AS) "
+            "- Different formatting, spacing, or capitalization "
+            "- Use of quotes around identifiers "
+            "- Simple reordering of conditions that doesn't change the logic "
+            "\n\nYour response must be in JSON format with two fields: "
+            "'equivalent' (true/false) and 'explanation' (a brief explanation of your judgment)."
+        )
+
 class ModelConfig(BaseModel):
     """Base model configuration"""
     seed: int = Field(default=42, description="Random seed for reproducibility")
@@ -37,7 +50,7 @@ class ModelProvider:
             self.config = self.config_class()  # Use defaults
 
     
-    def generate(self, system_message: str, user_message: str) -> str:
+    def generate(self, system_message: str, user_message: str, assistant_message: str = "") -> str:
         """
         Generate a response from the model.
         
@@ -49,6 +62,34 @@ class ModelProvider:
             Model's response as a string
         """
         raise NotImplementedError("Subclasses must implement this method")
+    
+    def judge(self, user_message: str, judge_model : str = 'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free', api_key : str=None) -> str:
+        """
+        LLM as a judge
+        """
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise ImportError(
+                "To use the Together.ai provider, you need to install the openai package: "
+                "pip install openai"
+            )
+        
+        client = OpenAI(
+            base_url="https://api.together.xyz/v1",
+            api_key=api_key or os.getenv("TOGETHER_API_KEY")
+        )
+        response = client.chat.completions.create(
+            model=judge_model,
+            messages=[
+                {"role": "system", "content": JUDGE_SYSTEM_MESSAGE},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0.0,
+            max_tokens=500,
+        )
+        return response.choices[0].message.content
+        
     
 class TogetherAIProvider(ModelProvider):
     config_class = TogetherAIConfig  # Override!

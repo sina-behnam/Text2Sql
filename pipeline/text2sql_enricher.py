@@ -10,13 +10,7 @@ from datetime import datetime
 import logging
 from tqdm import tqdm
 
-
 from src.dataloader import DatasetInstance
-from src.models import (
-                    TogetherAIProvider,
-                    OpenAIProvider,
-                    LocalHuggingFaceProvider,
-                    AnthropicProvider)
 
 from src.utils.utils import (
                         check_exact_match,
@@ -25,7 +19,11 @@ from src.utils.utils import (
                         check_sql_semantic_equivalence
                         )
 
-from src.utils.prompt_engineering import get_prompt_template
+from src.utils.templates.arctic import ArcticText2SQLTemplate
+from src.utils.templates.base import BasePromptTemplate
+from src.utils.templates.default import DefaultPromptTemplate
+
+from src.models.models import ModelProvider
 
 # make dir logs and remove old logs
 if not os.path.exists('./logs'):
@@ -48,73 +46,39 @@ class Text2SQLInferencePipeline:
     Supports both API-based and local models.
     """
     
-    def __init__(self, model_config: Dict, snowflake_config: Dict = None, prompt_template_key: str = 'default'):
+    def __init__(self, model_class: ModelProvider,prompt_template_class: BasePromptTemplate,judge_api_key:str,snowflake_config: Dict = None):
         """
         Initialize the pipeline with dataset paths and model configuration.
 
-        Args:
-            snowflake_config: Configuration for Snowflake connection, if applicable.
-            model_config: Configuration for the model to use, with keys:
-                - "type": "together_ai", "openai", "local", or "anthropic"
-                - "name": Model name (for API models) or path (for local models)
-                - "api_key": API key (for API models)
-                - "device": Device to use for local models ("cpu", "cuda", "auto")
-                - "max_new_tokens": Maximum tokens to generate (for local models)
-                - "max_tokens": Maximum tokens for Anthropic models
-                - "extended_thinking": Whether to use extended thinking for Anthropic
         """
         self.logger = logging.getLogger(__name__)
         self.logger.info("Initializing Text2SQLInferencePipeline...")
 
         # Use provided config or default
-        self.model_config = model_config
+        self.model_provider = model_class
+
+        # Store model info for later use
+        self.model_info = {
+            'model_name': self.model_provider.model_name,
+            'model_config': self.model_provider.config.model_dump()
+        }
 
         # Initialize Snowflake credentials if provided
         self.creds = snowflake_config if snowflake_config else None
 
-        # Initialize the model provider based on config
-        self._init_model_provider()
+        self.judge_api_key=judge_api_key
 
-        # Initialize the prompt template based on model name
-        self.prompt_template = get_prompt_template(prompt_template_key)  # Replace 'default' with your desired template key
-        self.logger.info(f"Using prompt template: {self.prompt_template.__class__.__name__}")
+        # Initialize the prompt template
+        if prompt_template_class:
+            self.prompt_template = prompt_template_class
+        else:
+            raise ValueError("A prompt_template_class must be provided to the pipeline. The current available options are ArcticText2SQLTemplate and DefaultPromptTemplate.")
 
         # Add this import at the top
         try:
             import snowflake.connector
         except ImportError:
-            self.logger.warning("snowflake-connector-python is not installed. Snowflake connections will not work.")
-
-    def _init_model_provider(self):
-        """Initialize the model provider based on the configuration"""
-        model_type = self.model_config.get("type", "together_ai").lower()
-        model_name = self.model_config.get("name")
-        model_path = self.model_config.get("path", None)
-        extended_thinking = self.model_config.get("extended_thinking", False)
-        param_config = self.model_config.get("param_config")
-        api_key = self.model_config.get("api_key")
-        
-        if model_type == "together_ai":
-            self.model_provider = TogetherAIProvider(model_name, api_key, param_config)
-        elif model_type == "openai":
-            self.model_provider = OpenAIProvider(model_name, api_key, param_config)
-        elif model_type == "local":
-            max_new_tokens = self.model_config.get("max_new_tokens", 512)
-            self.model_provider = LocalHuggingFaceProvider(model_path, "auto", max_new_tokens, extended_thinking=extended_thinking) # ! IT NEED TO ADD THE PARAM CONFIG LATER
-        elif model_type == "anthropic":
-            max_tokens = self.model_config.get("max_tokens", 1024)
-            extended_thinking = self.model_config.get("extended_thinking", False)
-            self.model_provider = AnthropicProvider(model_name, api_key, max_tokens, extended_thinking) # ! IT NEED TO ADD THE PARAM CONFIG LATER
-        else:
-            raise ValueError(f"Unsupported model type: {model_type}. The available options are 'together_ai', 'openai', 'local', and 'anthropic'.")
-        
-        # Store model info for later use
-        self.model_info = {
-            "model_name": model_name,
-            "model_type": model_type,
-            "param_config" : self.model_config.get("param_config"),
-            "timestamp": datetime.now().isoformat()
-        }
+            self.logger.warning("snowflake-connector-python is not installed. Snowflake connections will not work.")    
         
     def evaluate_instance(self, instance: DatasetInstance, generated_sql: str, instance_path: str) -> Dict:
         """
@@ -162,7 +126,7 @@ class Text2SQLInferencePipeline:
             # Otherwise, use the model to check semantic equivalence
             # This catches cases with no exact match, incorrect execution, but no specific error
             semantic_equivalent, semantic_explanation = check_sql_semantic_equivalence(
-                self.model_provider,generated_sql, instance.sql, instance.question
+                self.model_provider,generated_sql, instance.sql, instance.question,self.judge_api_key
             )
         
         # Close database connection
@@ -204,20 +168,22 @@ class Text2SQLInferencePipeline:
             # Set up the data that require to generate SQL.
             question = instance.question
             schema = instance.schemas
+            dialect = instance.database['type']
             evidence = instance.evidence
 
             # Generate SQL query
             # Get the prompt messages using the prompt template
-            system_message, user_message = self.prompt_template.create_prompt(
+            system_message, user_message, assis_message = self.prompt_template.create_prompt(
                 question=question,
                 schema=schema,
+                dialect=dialect,
                 evidence=evidence
             )
 
             # Giving the model provider, we can generate the SQL query.
             try:
                 # Generate response using the configured model provider
-                raw_response = self.model_provider.generate(system_message, user_message)
+                raw_response = self.model_provider.generate(system_message, user_message, assis_message)
             except Exception as e:
                 # Handle errors
                 error_message = f"Model error: {str(e)}"
