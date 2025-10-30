@@ -12,7 +12,7 @@ class HuggingFaceConfig(ModelConfig):
     dtype: str = Field(default="auto", description="Data type for model weights (auto, float16, bfloat16, float32)")
     trust_remote_code: bool = Field(default=True, description="Whether to trust remote code")
     stop_sequences: List[str] = Field(default_factory=list, description="Stop sequences for generation")
-    top_k: int = Field(default=50, gt=0, description="Top-k sampling parameter")
+    top_k: int = Field(default=50, ge=-1, description="Top-k sampling parameter (0 or None to disable)")
     repetition_penalty: float = Field(default=1.0, ge=1.0, le=2.0, description="Repetition penalty")
     use_cache: bool = Field(default=True, description="Whether to use KV cache for generation")
     do_sample: bool = Field(default=True, description="Whether to use sampling for generation")
