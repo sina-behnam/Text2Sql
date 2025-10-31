@@ -469,10 +469,10 @@ class Text2SQLInferencePipeline:
             if results_table:
                 wandb.log({'results_table': results_table})
             
-            # Log the local log file as an artifact
-            artifact = wandb.Artifact('pipeline_logs', type='logs')
-            artifact.add_file(log_filename)
-            self.wandb_run.log_artifact(artifact)
+            # # Log the local log file as an artifact
+            # artifact = wandb.Artifact('pipeline_logs', type='logs')
+            # artifact.add_file(log_filename)
+            # self.wandb_run.log_artifact(artifact)
             
             # Finish the run
             self.wandb_run.finish()
