@@ -3,12 +3,13 @@ import re
 import glob
 import sqlite3
 import pandas as pd
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 import sqlparse
 import json
 from datetime import datetime
 import logging
 from tqdm import tqdm
+import time
 
 from src.dataloader import DatasetInstance
 
@@ -24,6 +25,14 @@ from src.utils.templates.base import BasePromptTemplate
 from src.utils.templates.default import DefaultPromptTemplate
 
 from src.models.models import ModelProvider
+
+# Conditional wandb import
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("Warning: wandb not installed. Install with 'pip install wandb' for remote logging.")
 
 # make dir logs and remove old logs
 if not os.path.exists('./logs'):
@@ -43,13 +52,28 @@ logging.basicConfig(
 class Text2SQLInferencePipeline:
     """
     Pipeline for Text2SQL Inferencing task: loading data, generating SQL queries, and evaluating results.
-    Supports both API-based and local models.
+    Supports both API-based and local models with optional WandB logging.
     """
     
-    def __init__(self, model_class: ModelProvider,prompt_template_class: BasePromptTemplate,judge_api_key:str,snowflake_config: Dict = None):
+    def __init__(
+        self, 
+        model_class: ModelProvider,
+        prompt_template_class: BasePromptTemplate,
+        judge_api_key: str,
+        snowflake_config: Dict = None,
+        wandb_config: Optional[Dict] = None
+    ):
         """
         Initialize the pipeline with dataset paths and model configuration.
-
+        
+        Args:
+            wandb_config: Optional dictionary with WandB configuration:
+                - project: Project name (default: 'text2sql-inference')
+                - entity: WandB entity/team name
+                - name: Run name (default: auto-generated)
+                - tags: List of tags for the run
+                - notes: Notes about the run
+                - enabled: Whether to enable WandB logging (default: True if wandb_config provided)
         """
         self.logger = logging.getLogger(__name__)
         self.logger.info("Initializing Text2SQLInferencePipeline...")
@@ -66,7 +90,7 @@ class Text2SQLInferencePipeline:
         # Initialize Snowflake credentials if provided
         self.creds = snowflake_config if snowflake_config else None
 
-        self.judge_api_key=judge_api_key
+        self.judge_api_key = judge_api_key
 
         # Initialize the prompt template
         if prompt_template_class:
@@ -74,12 +98,119 @@ class Text2SQLInferencePipeline:
         else:
             raise ValueError("A prompt_template_class must be provided to the pipeline. The current available options are ArcticText2SQLTemplate and DefaultPromptTemplate.")
 
+        # Initialize WandB configuration
+        self.wandb_config = wandb_config
+        self.wandb_enabled = (
+            wandb_config is not None and 
+            wandb_config.get('enabled', True) and 
+            WANDB_AVAILABLE
+        )
+        self.wandb_run = None
+        
+        if self.wandb_config and not WANDB_AVAILABLE:
+            self.logger.warning("WandB configuration provided but wandb is not installed. Logging disabled.")
+
         # Add this import at the top
         try:
             import snowflake.connector
         except ImportError:
             self.logger.warning("snowflake-connector-python is not installed. Snowflake connections will not work.")    
         
+    def _initialize_wandb(self, num_instances: int):
+        """Initialize WandB run with configuration."""
+        if not self.wandb_enabled:
+            return
+        
+        # Default project name
+        project = self.wandb_config.get('project', 'text2sql-inference')
+        
+        # Auto-generate run name if not provided
+        default_name = f"{self.model_info['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        run_name = self.wandb_config.get('name', default_name)
+        
+        # Prepare config for wandb
+        config = {
+            'model': self.model_info,
+            'prompt_template': self.prompt_template.__class__.__name__,
+            'num_instances': num_instances,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Add any additional config from wandb_config
+        if 'config' in self.wandb_config:
+            config.update(self.wandb_config['config'])
+        
+        # Initialize wandb run
+        self.wandb_run = wandb.init(
+            project=project,
+            entity=self.wandb_config.get('entity'),
+            name=run_name,
+            tags=self.wandb_config.get('tags', []),
+            notes=self.wandb_config.get('notes'),
+            config=config
+        )
+        
+        self.logger.info(f"WandB run initialized: {self.wandb_run.name}")
+    
+    def _log_instance_result(self, instance: DatasetInstance, result: Dict, inference_time: float):
+        """Log individual instance result to WandB."""
+        if not self.wandb_enabled or not self.wandb_run:
+            return
+        
+        log_data = {
+            'instance_id': instance.id,
+            'inference_time': inference_time,
+            'has_prediction': result.get('has_prediction', False)
+        }
+        
+        if result.get('has_prediction', False):
+            pred = result['predicted_output']
+            log_data.update({
+                'execution_correct': pred.get('execution_correct', False),
+                'exact_match': pred.get('exact_match', False),
+                'semantic_equivalent': pred.get('semantic_equivalent', False),
+                'has_execution_error': bool(pred.get('execution_error'))
+            })
+        
+        wandb.log(log_data)
+    
+    def _create_results_table(self, results: List[Dict]) -> Optional[wandb.Table]:
+        """Create a WandB table with detailed results."""
+        if not self.wandb_enabled or not self.wandb_run:
+            return None
+        
+        columns = [
+            'instance_id', 
+            'question', 
+            'ground_truth_sql', 
+            'generated_sql',
+            'has_prediction',
+            'execution_correct', 
+            'exact_match', 
+            'semantic_equivalent',
+            'execution_error'
+        ]
+        
+        table_data = []
+        for r in results:
+            instance = r['instance']
+            pred = r.get('predicted_output', {})
+            
+            row = [
+                instance.id,
+                instance.question[:100] + '...' if len(instance.question) > 100 else instance.question,
+                instance.sql[:200] + '...' if len(instance.sql) > 200 else instance.sql,
+                (pred.get('generated_sql', '')[:200] + '...') if pred.get('generated_sql') and len(pred.get('generated_sql', '')) > 200 else pred.get('generated_sql', 'N/A'),
+                r.get('has_prediction', False),
+                pred.get('execution_correct', False),
+                pred.get('exact_match', False),
+                pred.get('semantic_equivalent', False),
+                pred.get('execution_error', '')[:100] if pred.get('execution_error') else ''
+            ]
+            table_data.append(row)
+        
+        return wandb.Table(columns=columns, data=table_data)
+    
     def evaluate_instance(self, instance: DatasetInstance, generated_sql: str, instance_path: str) -> Dict:
         """
         Evaluate the generated SQL query against the ground truth.
@@ -126,7 +257,7 @@ class Text2SQLInferencePipeline:
             # Otherwise, use the model to check semantic equivalence
             # This catches cases with no exact match, incorrect execution, but no specific error
             semantic_equivalent, semantic_explanation = check_sql_semantic_equivalence(
-                self.model_provider,generated_sql, instance.sql, instance.question,self.judge_api_key
+                self.model_provider, generated_sql, instance.sql, instance.question, self.judge_api_key
             )
         
         # Close database connection
@@ -159,10 +290,14 @@ class Text2SQLInferencePipeline:
             Evaluation results with comprehensive information
         """
         
+        # Initialize WandB
+        self._initialize_wandb(len(instances))
+        
         results = []
         
         # Process each instance
         for instance, file_path in tqdm(instances, desc="Processing instances", unit="instance"):
+            start_time = time.time()
             self.logger.info(f"Processing instance {instance.id}...")
             
             # Set up the data that require to generate SQL.
@@ -199,7 +334,7 @@ class Text2SQLInferencePipeline:
                     }
                 }
                 
-                results.append({
+                result = {
                     'instance': instance,
                     'has_prediction': False,
                     'predicted_output': {
@@ -207,10 +342,15 @@ class Text2SQLInferencePipeline:
                         'raw_response': raw_response
                     },
                     'model': self.model_info
-                })
+                }
+                results.append(result)
+                
+                # Log to WandB
+                inference_time = time.time() - start_time
+                self._log_instance_result(instance, result, inference_time)
+                
                 self.logger.info("Failed to generate SQL from model response")
                 continue
-
 
             # Extract SQL query from the raw response using the prompt template
             generated_sql = self.prompt_template.extract_sql(raw_response)
@@ -235,14 +375,17 @@ class Text2SQLInferencePipeline:
                         'execution_correct': evaluation['predicted_output']['execution_correct'],
                         'execution_error': evaluation['predicted_output']['execution_error'],
                         'exact_match': evaluation['predicted_output']['exact_match'],
-                        'semantic_equivalent': evaluation['predicted_output'].get('semantic_equivalent', None
-                        ),
+                        'semantic_equivalent': evaluation['predicted_output'].get('semantic_equivalent', None),
                         'semantic_explanation': evaluation['predicted_output'].get('semantic_explanation', ''),
                         'raw_response': raw_response
                     }
                 })
 
                 instance.inference_results = existing_results
+                
+                # Log to WandB
+                inference_time = time.time() - start_time
+                self._log_instance_result(instance, evaluation, inference_time)
                 
                 self.logger.info(f"Execution correct: {evaluation['predicted_output']['execution_correct']}")
                 self.logger.info(f"Exact match: {evaluation['predicted_output']['exact_match']}")
@@ -269,6 +412,10 @@ class Text2SQLInferencePipeline:
                         'raw_response': raw_response
                     }
                 }
+                
+                # Log to WandB
+                inference_time = time.time() - start_time
+                self._log_instance_result(instance, failed_result, inference_time)
                 
                 self.logger.info("Failed to extract SQL from model response")
                 
@@ -304,6 +451,32 @@ class Text2SQLInferencePipeline:
         self.logger.info(f"Execution accuracy: {metrics['execution_accuracy']:.2f}")
         self.logger.info(f"Exact match accuracy: {metrics['exact_match_accuracy']:.2f}")
         self.logger.info(f"Semantic equivalence accuracy: {metrics['semantic_equivalent_accuracy']:.2f}")
+        
+        # Log final metrics and table to WandB
+        if self.wandb_enabled and self.wandb_run:
+            # Log summary metrics
+            wandb.log({
+                'summary/num_evaluated': num_eval,
+                'summary/num_with_prediction': num_with_prediction,
+                'summary/prediction_rate': metrics['prediction_rate'],
+                'summary/execution_accuracy': metrics['execution_accuracy'],
+                'summary/exact_match_accuracy': metrics['exact_match_accuracy'],
+                'summary/semantic_equivalent_accuracy': metrics['semantic_equivalent_accuracy']
+            })
+            
+            # Create and log results table
+            results_table = self._create_results_table(results)
+            if results_table:
+                wandb.log({'results_table': results_table})
+            
+            # Log the local log file as an artifact
+            artifact = wandb.Artifact('pipeline_logs', type='logs')
+            artifact.add_file(log_filename)
+            self.wandb_run.log_artifact(artifact)
+            
+            # Finish the run
+            self.wandb_run.finish()
+            self.logger.info("WandB run finished")
         
         return metrics
         
