@@ -28,12 +28,14 @@ class FrequencyPresencePenaltyLogitsProcessor(LogitsProcessor):
 
     Frequency penalty: Penalizes tokens based on how often they appear (linear with count)
     Presence penalty: Penalizes tokens that have appeared at least once (binary)
+
+    Optimized version that uses vectorized operations and avoids CPU-GPU transfers.
     """
 
-    def __init__(self, frequency_penalty: float = 0.0, presence_penalty: float = 0.0):
+    def __init__(self, frequency_penalty: float = 0.0, presence_penalty: float = 0.0, vocab_size: int = None):
         self.frequency_penalty = frequency_penalty
         self.presence_penalty = presence_penalty
-        self.token_counts = {}
+        self.vocab_size = vocab_size
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         """
@@ -46,24 +48,36 @@ class FrequencyPresencePenaltyLogitsProcessor(LogitsProcessor):
         Returns:
             Modified logits with penalties applied
         """
-        batch_size = input_ids.shape[0]
+        # Early exit if no penalties
+        if self.frequency_penalty == 0.0 and self.presence_penalty == 0.0:
+            return scores
 
-        for batch_idx in range(batch_size):
-            # Count token frequencies in the current sequence
-            token_counts = {}
-            for token_id in input_ids[batch_idx].tolist():
-                token_counts[token_id] = token_counts.get(token_id, 0) + 1
+        batch_size, seq_len = input_ids.shape
+        vocab_size = scores.shape[-1]
 
-            # Apply penalties
-            for token_id, count in token_counts.items():
-                if token_id < scores.shape[-1]:  # Safety check
-                    # Frequency penalty: proportional to count
-                    if self.frequency_penalty != 0.0:
-                        scores[batch_idx, token_id] -= self.frequency_penalty * count
+        # Use vectorized operations on GPU/same device as input_ids
+        device = input_ids.device
 
-                    # Presence penalty: binary (token appeared or not)
-                    if self.presence_penalty != 0.0:
-                        scores[batch_idx, token_id] -= self.presence_penalty
+        # Create frequency count tensor [batch_size, vocab_size]
+        # This is much faster than Python loops and stays on GPU
+        token_counts = torch.zeros((batch_size, vocab_size), dtype=scores.dtype, device=device)
+
+        # Use scatter_add for vectorized counting
+        # This counts all tokens in one operation instead of looping
+        token_counts.scatter_add_(
+            dim=1,
+            index=input_ids,
+            src=torch.ones_like(input_ids, dtype=scores.dtype)
+        )
+
+        # Apply frequency penalty (vectorized)
+        if self.frequency_penalty != 0.0:
+            scores -= self.frequency_penalty * token_counts
+
+        # Apply presence penalty (vectorized, binary mask)
+        if self.presence_penalty != 0.0:
+            presence_mask = (token_counts > 0).to(scores.dtype)
+            scores -= self.presence_penalty * presence_mask
 
         return scores
 
@@ -406,7 +420,122 @@ class HuggingFaceProvider(ModelProvider):
                 raise e
             else:
                 raise e
-                    
+
+    def batch_generate(
+        self,
+        system_messages: List[str],
+        user_messages: List[str],
+        assistant_prefixes: Optional[List[str]] = None
+    ) -> List[str]:
+        """
+        Generate responses for multiple prompts in a single batch for faster throughput.
+
+        Args:
+            system_messages: List of system messages (one per prompt)
+            user_messages: List of user messages (one per prompt)
+            assistant_prefixes: Optional list of assistant prefixes (one per prompt)
+
+        Returns:
+            List of model responses as strings
+
+        Note:
+            - All prompts in the batch will be padded to the same length
+            - Batch size affects memory usage; reduce if you get OOM errors
+            - Much faster than calling generate() in a loop for multiple prompts
+        """
+        if len(system_messages) != len(user_messages):
+            raise ValueError("system_messages and user_messages must have the same length")
+
+        batch_size = len(system_messages)
+
+        if assistant_prefixes is None:
+            assistant_prefixes = [""] * batch_size
+        elif len(assistant_prefixes) != batch_size:
+            raise ValueError("assistant_prefixes must have the same length as system_messages")
+
+        # Format and prepare all prompts
+        prompts = []
+        for i in range(batch_size):
+            messages = self._format_chat_messages(
+                system_messages[i],
+                user_messages[i],
+                assistant_prefixes[i]
+            )
+            prompt = self._apply_chat_template(messages)
+            prompts.append(prompt)
+
+        # Tokenize all prompts with padding
+        inputs = self.tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,  # Pad to the same length
+            truncation=True,
+            max_length=self.context_length - self.config.max_tokens
+        )
+
+        if self.device == "cuda":
+            inputs = inputs.to(self.device)
+
+        # Setup logits processors for frequency and presence penalties
+        logits_processors = LogitsProcessorList()
+
+        if self.config.frequency_penalty != 0.0 or self.config.presence_penalty != 0.0:
+            logits_processors.append(
+                FrequencyPresencePenaltyLogitsProcessor(
+                    frequency_penalty=self.config.frequency_penalty,
+                    presence_penalty=self.config.presence_penalty
+                )
+            )
+
+        # Generate for all prompts in batch
+        try:
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.config.max_tokens,
+                    temperature=self.config.temperature if self.config.do_sample else None,
+                    do_sample=self.config.do_sample,
+                    top_p=self.config.top_p if self.config.do_sample else None,
+                    top_k=self.config.top_k if self.config.do_sample else None,
+                    repetition_penalty=self.config.repetition_penalty,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.stop_token_ids if self.stop_token_ids else self.tokenizer.eos_token_id,
+                    use_cache=self.config.use_cache,
+                    logits_processor=logits_processors if len(logits_processors) > 0 else None
+                )
+
+            # Decode each output in the batch
+            responses = []
+            input_lengths = inputs['attention_mask'].sum(dim=1)  # Get actual input length per sample
+
+            for i in range(batch_size):
+                # Decode only the new tokens for this sample
+                generated_tokens = outputs[i][input_lengths[i]:]
+                generated_text = self.tokenizer.decode(
+                    generated_tokens,
+                    skip_special_tokens=True
+                ).strip()
+
+                # Remove stop sequences
+                generated_text = self._remove_stop_sequences(generated_text)
+
+                # Combine with prefix if provided
+                if assistant_prefixes[i]:
+                    full_response = assistant_prefixes[i] + generated_text
+                else:
+                    full_response = generated_text
+
+                responses.append(full_response)
+
+            return responses
+
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                print(f"OOM error during batch generation! Try reducing batch size or max_tokens.")
+                raise e
+            else:
+                raise e
+
 
     def update_generation_config(self, **kwargs):
         """
