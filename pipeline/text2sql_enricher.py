@@ -370,11 +370,12 @@ class Text2SQLInferencePipeline:
 
                 # Store raw response with metadata
                 self.raw_responses[instance_id] = {
+                    'dataset' : instance.dataset,
+                    'database': instance.database.get('name', ''),
+                    'gold_sql': instance.sql,
                     'raw_response': raw_response,
                     'inference_time': inference_time,
                     'question': question,
-                    'schema': schema,
-                    'dialect': dialect,
                     'evidence': evidence,
                     'file_path': file_path,
                     'has_error': False
@@ -388,11 +389,12 @@ class Text2SQLInferencePipeline:
 
                 inference_time = time.time() - start_time
                 self.raw_responses[instance_id] = {
+                    'dataset' : instance.dataset,
+                    'database': instance.database.get('name', ''),
+                    'gold_sql': instance.sql,
                     'raw_response': f"Error generating SQL: {error_message}",
                     'inference_time': inference_time,
                     'question': question,
-                    'schema': schema,
-                    'dialect': dialect,
                     'evidence': evidence,
                     'file_path': file_path,
                     'has_error': True,
