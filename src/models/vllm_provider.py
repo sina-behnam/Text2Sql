@@ -3,7 +3,7 @@ from pydantic import Field
 from src.models.models import ModelProvider, ModelConfig
 from typing import Optional, List, Dict
 import re
-
+import warnings
 
 class VLLMConfig(ModelConfig):
     """Configuration for vLLM-based models"""
@@ -284,6 +284,12 @@ class VLLMProvider(ModelProvider):
 
     def update_sampling_params(self, **kwargs):
         """Update sampling parameters dynamically"""
+        # deprecated: use the update_config method instead
+        warnings.warn(
+            "update_sampling_params is deprecated. Use update_config instead.",
+            DeprecationWarning
+        )
+
         current_params = {
             'seed': self.config.seed,
             'temperature': self.config.temperature,

@@ -544,6 +544,12 @@ class HuggingFaceProvider(ModelProvider):
         Args:
             **kwargs: Parameters to update (temperature, top_p, max_tokens, etc.)
         """
+        # deprecated method - update_config
+        warnings.warn(
+                "update_generation_config is deprecated. Use update_config instead.",
+                DeprecationWarning
+        )
+
         config_dict = self.config.model_dump()
         config_dict.update(kwargs)
         self.config = HuggingFaceConfig(**config_dict)
