@@ -184,7 +184,7 @@ class HuggingFaceProvider(ModelProvider):
         """Detect the model family from the model name"""
         model_name_lower = model_name.lower()
 
-        if 'qwen' in model_name_lower:
+        if 'qwen' or 'arctic' in model_name_lower:
             return 'qwen'
         elif 'llama' in model_name_lower:
             return 'llama'
