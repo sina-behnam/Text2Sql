@@ -8,7 +8,7 @@ class DefaultPromptTemplate(BasePromptTemplate):
         super().__init__()
 
         self.user_message_template = '''
-        {full_question}
+        Question : {full_question}
 
         Database schema (with {dialect} dialect ) :
         ```
@@ -48,6 +48,23 @@ class DefaultPromptTemplate(BasePromptTemplate):
                     "sql": "SELECT name FROM employees WHERE age > 30",
                     "explanation": "Selects names of employees older than 30"
                 }
+
+            Example:
+
+            Question: List the names of all employees hired after 2020.
+
+            Database schema (with sqlite dialect):
+            ```
+            [
+                {'table_name': 'employees', 'description': 'Employee details', 'ddl': 'CREATE TABLE employees (id INT, name VARCHAR, hire_date DATE);'}
+            ]
+            ```
+
+            Response:
+            {
+                "sql": "SELECT name FROM employees WHERE hire_date > '2020-12-31'",
+                "explanation": "Selects names of employees hired after December 31, 2020"
+            }
             """
         )
 
@@ -57,7 +74,7 @@ class DefaultPromptTemplate(BasePromptTemplate):
             dialect=dialect
         )
 
-        return system_message, user_message
+        return system_message, user_message, ""
 
     def extract_sql(self, response_text: str, clean: bool = True) -> str:
         """

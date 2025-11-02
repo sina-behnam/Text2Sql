@@ -43,7 +43,7 @@ class ArcticText2SQLTemplate(BasePromptTemplate):
     
     def create_prompt(self, question: str, schema: str, dialect: str,
                      evidence: Optional[str] = None,
-                     few_shot_examples: Optional[List[Dict]] = None) -> Tuple[str, str]:
+                     few_shot_examples: Optional[List[Dict]] = None) -> Tuple[str, str, str]:
         """Create Arctic-specific prompt format."""
         
         user_message = USER_PROMPT_TEMPLATE.format(
