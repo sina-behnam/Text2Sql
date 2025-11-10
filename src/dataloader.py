@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
 import pandas as pd
+import torch
+from torch.utils.data import Dataset, DataLoader
 
 
 # Configure logging
@@ -190,3 +192,169 @@ class DatasetLoader:
     def filter_by_dataset(self, dataset: str) -> List[DatasetInstance]:
         """Filter instances by dataset type"""
         return [inst for inst in self.instances if inst.dataset == dataset]
+
+
+class Text2SQLDataset(Dataset):
+    """PyTorch Dataset for Text2SQL instances using Arctic template"""
+
+    def __init__(self, data_path: str, pattern: str = "instance_*.json",
+                 template=None, dialect: str = "SQLite"):
+        """
+        Initialize the PyTorch Dataset.
+
+        Args:
+            data_path: Path to the data directory
+            pattern: Glob pattern to match instance files
+            template: Prompt template instance (e.g., ArcticText2SQLTemplate)
+            dialect: SQL dialect (e.g., "SQLite", "PostgreSQL")
+        """
+        self.data_path = Path(data_path)
+        self.dialect = dialect
+        self.template = template
+
+        # Load instances with their file paths
+        self.instances_with_paths = self._load_instances(pattern)
+
+        logger.info(f"Initialized Text2SQLDataset with {len(self.instances_with_paths)} instances")
+
+    def _load_instances(self, pattern: str) -> List[Tuple[DatasetInstance, str]]:
+        """Load all instances matching the pattern"""
+        logger.info(f"Loading instances from {self.data_path} with pattern {pattern}")
+
+        instance_files = list(self.data_path.glob(pattern))
+        logger.info(f"Found {len(instance_files)} instance files")
+
+        instances_with_paths = []
+        for file_path in sorted(instance_files):  # Sort for deterministic ordering
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    instance = DatasetInstance.from_dict(data)
+                    instances_with_paths.append((instance, str(file_path)))
+                    logger.debug(f"Loaded instance {instance.id} from {file_path.name}")
+            except Exception as e:
+                logger.error(f"Error loading {file_path}: {e}")
+
+        logger.info(f"Successfully loaded {len(instances_with_paths)} instances")
+        return instances_with_paths
+
+    def _format_schema(self, schemas: List[Dict]) -> str:
+        """Format schema information into a string"""
+        schema_parts = []
+        for i,schema in enumerate(schemas):
+            table_name = schema.get('table_name')
+            ddl = schema.get('DDL')
+            description = schema.get('description', '')
+
+            shcema_part = f"\nTable {i+1} Name : {table_name}\nDDL:\n```{self.dialect}\n{ddl}```\nDescription: {description}"
+            # sep = "\n" + "-"*40 + "\n"
+            # if i > 0:
+            #     schema_parts.append(sep)
+            schema_parts.append(shcema_part)
+
+        return "\n\n".join(schema_parts)
+
+    def __len__(self) -> int:
+        """Return the number of instances in the dataset"""
+        return len(self.instances_with_paths)
+
+    def __getitem__(self, idx: int) -> Dict:
+        """
+        Get a single item from the dataset.
+
+        Returns:
+            Dictionary containing:
+                - system_message: System prompt
+                - user_message: User prompt with schema and question
+                - assistant_prefix: Assistant's prefix to start generation
+                - instance_path: Path to the instance file
+                - instance_id: ID of the instance
+                - question: Original question
+                - ground_truth_sql: Ground truth SQL query
+                - evidence: Additional evidence (if available)
+                - database_name: Name of the database
+        """
+        instance, instance_path = self.instances_with_paths[idx]
+
+        # Format schema
+        schema_str = self._format_schema(instance.schemas)
+
+        # Create prompt using template if provided
+        if self.template:
+            system_message, user_message, assistant_prefix = self.template.create_prompt(
+                question=instance.question,
+                schema=schema_str,
+                dialect=self.dialect,
+                evidence=instance.evidence
+            )
+        else:
+            # Fallback if no template provided
+            system_message = ""
+            user_message = f"Schema:\n{schema_str}\n\nQuestion: {instance.question}"
+            assistant_prefix = ""
+
+        return {
+            'system_message': system_message,
+            'user_message': user_message,
+            'assistant_prefix': assistant_prefix,
+            'instance_path': instance_path,
+            'instance_id': instance.id,
+            'question': instance.question,
+            'ground_truth_sql': instance.sql,
+            'evidence': instance.evidence or "",
+            'database_name': instance.database.get('name', 'unknown'),
+            'difficulty': instance.difficulty,
+            'dataset': instance.dataset
+        }
+
+
+def create_text2sql_dataloader(data_path: str,
+                               pattern: str = "instance_*.json",
+                               template=None,
+                               dialect: str = "SQLite",
+                               batch_size: int = 1,
+                               shuffle: bool = False,
+                               num_workers: int = 0,
+                               collate_fn=None) -> DataLoader:
+    """
+    Create a PyTorch DataLoader for Text2SQL dataset.
+
+    Args:
+        data_path: Path to the data directory
+        pattern: Glob pattern to match instance files
+        template: Prompt template instance (e.g., ArcticText2SQLTemplate)
+        dialect: SQL dialect
+        batch_size: Batch size for the DataLoader
+        shuffle: Whether to shuffle the data
+        num_workers: Number of worker processes for data loading
+        collate_fn: Custom collate function for batching
+
+    Returns:
+        PyTorch DataLoader instance
+    """
+    dataset = Text2SQLDataset(
+        data_path=data_path,
+        pattern=pattern,
+        template=template,
+        dialect=dialect
+    )
+
+    # Default collate function that handles batching of dictionaries
+    if collate_fn is None:
+        def default_collate(batch):
+            """Default collate function for batching"""
+            return {
+                key: [item[key] for item in batch]
+                for key in batch[0].keys()
+            }
+        collate_fn = default_collate
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=collate_fn
+    )
+
+    return dataloader
