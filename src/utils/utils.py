@@ -9,33 +9,64 @@ import re
 from typing import Dict, List, Optional, Tuple, Any, Union
 from pathlib import Path
 from dataclasses import dataclass, asdict
+from utils.sql.sql_executors import check_execution_accuracy_full
 
-def get_db_connection(instance, instance_path: str = None, snowflake_creds: Dict[str, str] = None):
-    """Get database connection based on type"""
+def get_db_path(instance, instance_path: str = None) -> str:
+    """Get database path based on type"""
     database_info = instance.database
     db_type = database_info.get('type', 'sqlite').lower()
     if db_type == 'sqlite' and instance.dataset != 'spider2-lite':
         db_name = database_info['name']
         db_file = database_info['path'][0].split('/')[-1]  # Get the last part of the path
         database_path = os.path.join(os.path.dirname(instance_path),'databases', db_name,  db_file)
-        return sqlite3.connect(database_path), 'sqlite'
+        return database_path
     elif db_type == 'sqlite' and instance.dataset == 'spider2-lite':
         db_file = database_info['path'][0]
         database_path = os.path.join(os.path.dirname(instance_path), db_file)
-        return sqlite3.connect(database_path), 'sqlite'
+        return database_path
     elif db_type == 'snowflake':
+        return 'snowflake'    
+    else:
+        return None
+    
+def check_execution_accuracy_general(predicted_sql: str,
+                                    ground_truth_sql: str,
+                                    db_type: str,
+                                    skip_unsafe: bool,
+                                    db_path: str):
+    if db_type == 'sqlite':
+        return check_execution_accuracy_full(
+            predicted_sql=predicted_sql,
+            ground_truth_sql=ground_truth_sql,
+            db_path=db_path,
+            skip_unsafe=skip_unsafe,
+        )
+    elif db_type == 'snowflake':
+        # Implement Snowflake execution accuracy check if needed
+        raise NotImplementedError("Snowflake execution accuracy check is not implemented yet.")
+    else:
+        raise ValueError(f"Unsupported database type: {db_type}")
+
+def get_db_connection(instance, instance_path: str = None, snowflake_creds: Dict[str, str] = None):
+
+    db_path = get_db_path(instance, instance_path)
+
+    if db_path:
+        return sqlite3.connect(db_path), 'sqlite', db_path
+    elif db_path == 'snowflake':
         # Load credentials
         try:
             import snowflake.connector
         except ImportError:
             raise ImportError("snowflake-connector-python is not installed. Please install it to use Snowflake databases.")
+        database_info = instance.database
         conn = snowflake.connector.connect(
             database=database_info['name'],
             **snowflake_creds
         )
-        return conn, 'snowflake'
+        return conn, 'snowflake', None
     else:
-        raise ValueError(f"Unsupported database type: {db_type}")
+        raise ValueError(f"Unsupported database type: {instance.database.get('type', 'sqlite')}")
     
 def check_sql_semantic_equivalence(model_provider,predicted_sql: str, ground_truth_sql: str, 
                                   question: str,api_key:str) -> Tuple[bool, str]:
@@ -231,13 +262,17 @@ def normalize_sql(sql: str) -> str:
         Normalized SQL query string
     """
     # Use sqlparse to format the SQL query
-    parsed = sqlparse.parse(sql)
-    
-    # Convert parsed SQL back to string
-    normalized_sql = sqlparse.format(str(parsed[0]), reindent=True, keyword_case='upper')
-    
-    # Remove extra spaces
-    normalized_sql = re.sub(r'\s+', ' ', normalized_sql).strip()
+    try:
+        parsed = sqlparse.parse(sql)
+
+        # Convert parsed SQL back to string
+        normalized_sql = sqlparse.format(str(parsed[0]), reindent=True, keyword_case='upper')
+
+        # Remove extra spaces
+        normalized_sql = re.sub(r'\s+', ' ', normalized_sql).strip()
+    except Exception:
+        # Fallback: simple whitespace normalization
+        normalized_sql = re.sub(r'\s+', ' ', sql).strip()
     
     return normalized_sql
     
