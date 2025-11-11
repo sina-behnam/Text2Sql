@@ -1,5 +1,6 @@
 from typing import Optional, Tuple
 from src.utils.templates.base import BasePromptTemplate
+import re
 
 class DefaultPromptTemplate(BasePromptTemplate):
     """Default prompt template for generic models."""
@@ -75,8 +76,25 @@ class DefaultPromptTemplate(BasePromptTemplate):
         )
 
         return system_message, user_message, ""
+    
+    
+    def clean_sql(self,sql):
+        """Clean and normalize SQL query."""
+        if not sql:
+            return None
 
-    def extract_sql(self, response_text: str, clean: bool = True) -> str:
+        # Remove trailing semicolon
+        sql = sql.rstrip(';').strip()
+
+        # Normalize whitespace
+        sql = re.sub(r'\s+', ' ', sql)
+
+        # Remove common prefixes
+        sql = re.sub(r'^(sql:\s*|SQL:\s*)', '', sql, flags=re.IGNORECASE)
+
+        return sql.strip()
+
+    def extract_sql_2(self, response_text: str, clean: bool = True) -> str:
         """
         Generic SQL extraction method that can be used by subclasses.
 
@@ -102,8 +120,8 @@ class DefaultPromptTemplate(BasePromptTemplate):
                             extractor._try_direct_sql_extraction]
         
         sql = extractor._try_extraction_methods(sql_function_set, response_text)
-        if sql and extractor._is_valid_sql(sql):
-            return extractor._clean_sql(sql) if clean else sql
+        if sql and self._is_valid_sql(sql):
+            return self._clean_sql(sql) if clean else sql
     
 
         return ""
