@@ -1,7 +1,6 @@
 import os
 import sys
 from src.utils.templates.base import BasePromptTemplate
-from src.models.vllm_provider import VLLMProvider, VLLMConfig
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 from src.dataloader import DataLoader, Text2SQLDataset
@@ -61,124 +60,32 @@ class OmniSQLPromptTemplate(BasePromptTemplate):
             return self._clean_sql(sql)
         
         return None
-    
-class OmniConfig(VLLMConfig):
-    tensor_parallel_size: int = 1
-    gpu_memory_utilization: float = 0.8
-    dtype: str = 'float16'
-    max_model_len: int = 8192
-    enforce_eager: bool = True
-    disable_custom_all_reduce: bool = True
-    trust_remote_code: bool = True
-    # 
-    temperature: float = 0.2
-    frequency_penalty: float = 0.0
-    presence_penalty: float = 0.0
-    max_tokens: int = 2048
-    n: int = 1
-    # 
-    swap_space: int = 8
-    # 
-    logprobs: int = 5
 
-
-class OmniModelProvider(VLLMProvider):
-    
-    config_class = OmniConfig
-
-    def __init__(self, model_name: str, config: VLLMConfig, **config_kwargs):
+def generate_batch(batched_instances, llm ,tokenizer, sampling_params):
+    # Extract instance IDs and user messages
+    instances_ids = batched_instances['instance_id'].detach().cpu().tolist()
+    user_messages = batched_instances['user_message']
         
-        self.model_name = model_name
-        if config is not None:
-            self.config = config
-        else:
-            self.config = self.config_class(**config_kwargs)
-
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-        self.llm = LLM(
-            model = self.model_name,
-            dtype = self.config.dtype,
-            tensor_parallel_size = self.config.tensor_parallel_size,
-            max_model_len = self.config.max_model_len,
-            gpu_memory_utilization = self.config.gpu_memory_utilization,
-            swap_space = self.config.swap_space,
-            enforce_eager = self.config.enforce_eager,
-            disable_custom_all_reduce = self.config.disable_custom_all_reduce,
-            trust_remote_code = self.config.trust_remote_code,
+    # Generate chat prompts for all instances
+    chat_prompts = []
+    for user_message in user_messages:
+        chat_prompt = tokenizer.apply_chat_template(
+            [{"role": "user", "content": user_message}],
+            add_generation_prompt=True, 
+            tokenize=False
         )
-
-        self.sampling_params = SamplingParams(
-            seed=self.config.seed,
-            temperature = self.config.temperature,
-            frequency_penalty = self.config.frequency_penalty,
-            presence_penalty = self.config.presence_penalty,
-            max_tokens = self.config.max_tokens,
-            n = self.config.n,
-            logprobs=self.config.logprobs,
-            prompt_logprobs=True if self.config.logprobs and self.config.logprobs > 0 else False,
-        )
-
-    def generate(self, user_message: str):
+        chat_prompts.append(chat_prompt)
         
-        chat_prompt = self.tokenizer.apply_chat_template(
-            [{"role" : "user", "content" : user_message}],
-            add_generation_prompt = True, tokenize= True)
-        
-        outputs = self.llm.generate([chat_prompt], sampling_params=self.sampling_params)     
+    # Batch generate for all prompts at once
+    outputs = llm.generate(chat_prompts, sampling_params=sampling_params)
 
-        for output in outputs:
-            responses = [o.text for o in output.outputs]
+    # Map outputs back to instance IDs
+    batch_responses = {}
+    for inst_id, output in zip(instances_ids, outputs):
+        # Get the first (and typically only) response
+        batch_responses[inst_id] = output.outputs[0].text
 
-        return responses[0]
-    
-    def generate_batch(self, batched_instances):
-        # Extract instance IDs and user messages
-        instances_ids = batched_instances['instance_id'].detach().cpu().tolist()
-        user_messages = batched_instances['user_message']
-
-        # Generate chat prompts for all instances
-        chat_prompts = []
-        for user_message in user_messages:
-            chat_prompt = self.tokenizer.apply_chat_template(
-                [{"role": "user", "content": user_message}],
-                add_generation_prompt=True,
-                tokenize=False
-            )
-            chat_prompts.append(chat_prompt)
-
-        # Batch generate for all prompts at once
-        outputs = self.llm.generate(chat_prompts, sampling_params=self.sampling_params)
-
-        # Map outputs back to instance IDs with tokens and logprobs
-        batch_responses = {}
-        for inst_id, output in zip(instances_ids, outputs):
-            output_obj = output.outputs[0]
-
-            # Extract tokens and their logprobs as parallel lists
-            tokens_logprobs_list = []
-            if output_obj.logprobs:
-                for token_logprobs_dict in output_obj.logprobs:
-                    # Each token_logprobs_dict contains {token_id: Logprob object}
-                    # We'll extract all top-k tokens and their logprobs
-                    token_data = []
-                    for token_id, logprob_obj in token_logprobs_dict.items():
-                        decoded_token = logprob_obj.decoded_token
-                        logprob_value = logprob_obj.logprob
-                        token_data.append({
-                            'token': decoded_token,
-                            'logprob': logprob_value
-                        })
-                    tokens_logprobs_list.append(token_data)
-
-            batch_responses[inst_id] = {
-                'text': output_obj.text,
-                'tokens_logprobs': tokens_logprobs_list,  # List of lists with token-logprob pairs
-                'cumulative_logprob': output_obj.cumulative_logprob,
-            }
-
-        return batch_responses
-    
+    return batch_responses   
 
 def downaload_model():
     from huggingface_hub import snapshot_download
@@ -264,35 +171,37 @@ def main():
         num_workers=args.num_workers
     )
 
-    cfg = OmniConfig(
+    print("Dataset loaded. Number of samples:", len(dataset))
+
+    llm = LLM(
+        model = model_path,
+        dtype = "float16", 
         tensor_parallel_size = 1,
-        gpu_memory_utilization = 0.9,
-        dtype = 'float16',
         max_model_len = 8192,
+        gpu_memory_utilization = 0.92,
+        swap_space = 1,
         enforce_eager = True,
         disable_custom_all_reduce = True,
-        trust_remote_code = True,
-        temperature = temperature,
-        frequency_penalty = frequency_penalty,
-        presence_penalty = presence_penalty,
-        max_tokens = 2048,
-        n = 1,
-        swap_space = 1
+        trust_remote_code = True
     )
 
-    model = OmniModelProvider(
-        model_name = model_path,
-        config = cfg
+    sampling_params = SamplingParams(
+        temperature=temperature,
+        frequency_penalty=frequency_penalty,
+        presence_penalty=presence_penalty,
+        max_tokens=2048
     )
 
-    print("Model and DataLoader are ready.")
-    print(model.sampling_params)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+    print("Model and tokenizer loaded.")
+    print("Model Sampling Parameters:", sampling_params)
 
     batches_reposenses = []
 
     for batch_idx, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc="Processing Batches"):
 
-        batch_responses = model.generate_batch(batch)
+        batch_responses = generate_batch(batch, llm, tokenizer, sampling_params)
         
         batches_reposenses.append(batch_responses)
 
