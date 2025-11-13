@@ -136,7 +136,7 @@ class OmniModelProvider(VLLMProvider):
             chat_prompt = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": user_message}],
                 add_generation_prompt=True, 
-                tokenize=True
+                tokenize=False
             )
             chat_prompts.append(chat_prompt)
         
@@ -199,7 +199,10 @@ def argument_parser():
     parser.add_argument('--model_path', type=str, default='./models/OmniSQL-7B', help='Path to the OmniSQL model (default: ./models/OmniSQL-7B)')
     # add examples to help
     parser.epilog = '''Example usage: \n
-    python omnisql_runner.py --data_path ./data/text2sql_dataset.json --dialect sqlite --batch_size 4 --num_workers 2 --shuffle --temp 0.2 --fp 0.0 --pp 0.0
+    python omnisql_runner.py --data_path ./Data/v3_claude/bird_set_stratified \
+          --model_path ./models/OmniSQL-7B \
+          --dialect sqlite --batch_size 4 \
+          --num_workers 2 --shuffle --temp 0.2 --fp 0.0 --pp 0.0
     ''' 
     
     return parser
