@@ -81,11 +81,32 @@ def generate_batch(batched_instances, llm ,tokenizer, sampling_params):
 
     # Map outputs back to instance IDs
     batch_responses = {}
+    batch_logprobs = {}
+
     for inst_id, output in zip(instances_ids, outputs):
         # Get the first (and typically only) response
-        batch_responses[inst_id] = output.outputs[0].text
+        generated_output = output.outputs[0]
+        batch_responses[inst_id] = generated_output.text
 
-    return batch_responses   
+        # Extract logprobs for each token
+        # Each element in logprobs is a dict mapping token_id -> Logprob object
+        token_logprobs = []
+        if generated_output.logprobs:
+            for token_position_logprobs in generated_output.logprobs:
+                # token_position_logprobs is a dict: {token_id: Logprob}
+                # Convert to list of dicts containing token info and logprob
+                position_data = []
+                for token_id, logprob_obj in token_position_logprobs.items():
+                    position_data.append({
+                        'token_id': token_id,
+                        'logprob': logprob_obj.logprob,
+                        'decoded_token': logprob_obj.decoded_token
+                    })
+                token_logprobs.append(position_data)
+
+        batch_logprobs[inst_id] = token_logprobs
+
+    return batch_responses, batch_logprobs   
 
 def downaload_model():
     from huggingface_hub import snapshot_download
@@ -115,6 +136,18 @@ def save_batch_responses_json(batches_responses, save_path):
         json.dump(all_responses, f, indent=4)
 
     print(f"Saved responses to {save_path}")
+
+def save_batch_logprobs_json(batches_logprobs, save_path):
+    import json
+
+    all_logprobs = {}
+    for batch_logprobs in batches_logprobs:
+        all_logprobs.update(batch_logprobs)
+
+    with open(save_path, 'w') as f:
+        json.dump(all_logprobs, f, indent=4)
+
+    print(f"Saved logprobs to {save_path}")
 
 def argument_parser():
     parser = argparse.ArgumentParser(description="OmniSQL Runner")
@@ -189,7 +222,8 @@ def main():
         temperature=temperature,
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
-        max_tokens=2048
+        max_tokens=2048,
+        logprobs=5  # Return top 5 logprobs for each token
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -198,18 +232,30 @@ def main():
     print("Model Sampling Parameters:", sampling_params)
 
     batches_reposenses = []
+    batches_logprobs = []
 
     for batch_idx, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc="Processing Batches"):
 
-        batch_responses = generate_batch(batch, llm, tokenizer, sampling_params)
-        
-        batches_reposenses.append(batch_responses)
+        batch_responses, batch_logprobs = generate_batch(batch, llm, tokenizer, sampling_params)
 
+        batches_reposenses.append(batch_responses)
+        batches_logprobs.append(batch_logprobs)
+
+        # Save batch responses
         save_path = os.path.join(f"omisql_responses_batch_{batch_idx}.json")
         save_batch_responses_json([batch_responses], save_path)
 
+        # Save batch logprobs
+        logprobs_save_path = os.path.join(f"omisql_logprobs_batch_{batch_idx}.json")
+        save_batch_logprobs_json([batch_logprobs], logprobs_save_path)
+
+    # Save all responses
     save_path = os.path.join("omisql_responses.json")
     save_batch_responses_json(batches_reposenses, save_path)
+
+    # Save all logprobs
+    logprobs_save_path = os.path.join("omisql_logprobs.json")
+    save_batch_logprobs_json(batches_logprobs, logprobs_save_path)
 
 if __name__ == "__main__":
     main()
