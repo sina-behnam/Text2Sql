@@ -78,6 +78,9 @@ class OmniConfig(VLLMConfig):
     n: int = 1
     # 
     swap_space: int = 8
+    # 
+    logprobs: int = 5
+
 
 class OmniModelProvider(VLLMProvider):
     
@@ -108,8 +111,12 @@ class OmniModelProvider(VLLMProvider):
         self.sampling_params = SamplingParams(
             seed=self.config.seed,
             temperature = self.config.temperature,
+            frequency_penalty = self.config.frequency_penalty,
+            presence_penalty = self.config.presence_penalty,
             max_tokens = self.config.max_tokens,
             n = self.config.n,
+            logprobs=self.config.logprobs,
+            prompt_logprobs=True if self.config.logprobs and self.config.logprobs > 0 else False,
         )
 
     def generate(self, user_message: str):
@@ -129,25 +136,46 @@ class OmniModelProvider(VLLMProvider):
         # Extract instance IDs and user messages
         instances_ids = batched_instances['instance_id'].detach().cpu().tolist()
         user_messages = batched_instances['user_message']
-        
+
         # Generate chat prompts for all instances
         chat_prompts = []
         for user_message in user_messages:
             chat_prompt = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": user_message}],
-                add_generation_prompt=True, 
+                add_generation_prompt=True,
                 tokenize=False
             )
             chat_prompts.append(chat_prompt)
-        
+
         # Batch generate for all prompts at once
         outputs = self.llm.generate(chat_prompts, sampling_params=self.sampling_params)
 
-        # Map outputs back to instance IDs
+        # Map outputs back to instance IDs with tokens and logprobs
         batch_responses = {}
         for inst_id, output in zip(instances_ids, outputs):
-            # Get the first (and typically only) response
-            batch_responses[inst_id] = output.outputs[0].text
+            output_obj = output.outputs[0]
+
+            # Extract tokens and their logprobs as parallel lists
+            tokens_logprobs_list = []
+            if output_obj.logprobs:
+                for token_logprobs_dict in output_obj.logprobs:
+                    # Each token_logprobs_dict contains {token_id: Logprob object}
+                    # We'll extract all top-k tokens and their logprobs
+                    token_data = []
+                    for token_id, logprob_obj in token_logprobs_dict.items():
+                        decoded_token = logprob_obj.decoded_token
+                        logprob_value = logprob_obj.logprob
+                        token_data.append({
+                            'token': decoded_token,
+                            'logprob': logprob_value
+                        })
+                    tokens_logprobs_list.append(token_data)
+
+            batch_responses[inst_id] = {
+                'text': output_obj.text,
+                'tokens_logprobs': tokens_logprobs_list,  # List of lists with token-logprob pairs
+                'cumulative_logprob': output_obj.cumulative_logprob,
+            }
 
         return batch_responses
     
@@ -188,6 +216,8 @@ def argument_parser():
     parser.add_argument('--dialect', type=str, default='sqlite', help='SQL dialect to use (default: sqlite)')
     # dataloader params
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size for DataLoader (default: 4)')
+    # do all in one batch
+    parser.add_argument('--all_in_one_batch', action='store_true', help='Process all data in one batch (default: False)')
     parser.add_argument('--num_workers', type=int, default=2, help='Number of workers for DataLoader (default: 2)')
     # # is shuffle
     parser.add_argument('--shuffle', action='store_true', help='Whether to shuffle the dataset (default: False)') 
@@ -223,9 +253,13 @@ def main():
 
     dataset = Text2SQLDataset(data_path, template=prompt_template, dialect=dialect)
 
+    batch_size = args.batch_size
+    if args.all_in_one_batch:
+        batch_size = len(dataset)
+
     dataloader = DataLoader(
         dataset,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         shuffle=args.shuffle,
         num_workers=args.num_workers
     )
@@ -252,7 +286,7 @@ def main():
     )
 
     print("Model and DataLoader are ready.")
-    print(model.config.model_dump_json(indent=4))
+    print(model.sampling_params)
 
     batches_reposenses = []
 
@@ -261,6 +295,9 @@ def main():
         batch_responses = model.generate_batch(batch)
         
         batches_reposenses.append(batch_responses)
+
+        save_path = os.path.join(f"omisql_responses_batch_{batch_idx}.json")
+        save_batch_responses_json([batch_responses], save_path)
 
     save_path = os.path.join("omisql_responses.json")
     save_batch_responses_json(batches_reposenses, save_path)
