@@ -195,6 +195,8 @@ def argument_parser():
     parser.add_argument('--temp', type=float, default=0.2, help='Temperature for model generation (default: 0.2)')
     parser.add_argument('--fp', type=float, default=0.0, help='Frequency penalty for model generation (default: 0.0)')
     parser.add_argument('--pp', type=float, default=0.0, help='Presence penalty for model generation (default: 0.0)')
+    # add model path
+    parser.add_argument('--model_path', type=str, default='./models/OmniSQL-7B', help='Path to the OmniSQL model (default: ./models/OmniSQL-7B)')
     # add examples to help
     parser.epilog = '''Example usage: \n
     python omnisql_runner.py --data_path ./data/text2sql_dataset.json --dialect sqlite --batch_size 4 --num_workers 2 --shuffle --temp 0.2 --fp 0.0 --pp 0.0
@@ -207,6 +209,7 @@ def main():
     args = argument_parser().parse_args()
 
     data_path = args.data_path
+    model_path = args.model_path
     dialect = args.dialect 
 
     temperature = args.temp
@@ -223,8 +226,6 @@ def main():
         shuffle=args.shuffle,
         num_workers=args.num_workers
     )
-
-    model_path = downaload_model()
 
     cfg = OmniConfig(
         tensor_parallel_size = 1,
