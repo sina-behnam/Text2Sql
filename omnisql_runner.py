@@ -75,38 +75,22 @@ def generate_batch(batched_instances, llm ,tokenizer, sampling_params):
             tokenize=False
         )
         chat_prompts.append(chat_prompt)
-        
+
     # Batch generate for all prompts at once
     outputs = llm.generate(chat_prompts, sampling_params=sampling_params)
 
     # Map outputs back to instance IDs
     batch_responses = {}
-    batch_logprobs = {}
-
     for inst_id, output in zip(instances_ids, outputs):
-        # Get the first (and typically only) response
+        
         generated_output = output.outputs[0]
-        batch_responses[inst_id] = generated_output.text
+        batch_responses[inst_id] = {
+            "text" : generated_output.text,
+            "token_ids" : generated_output.token_ids,
+            "logprobs" : generated_output.logprobs
+        }
 
-        # Extract logprobs for each token
-        # Each element in logprobs is a dict mapping token_id -> Logprob object
-        token_logprobs = []
-        if generated_output.logprobs:
-            for token_position_logprobs in generated_output.logprobs:
-                # token_position_logprobs is a dict: {token_id: Logprob}
-                # Convert to list of dicts containing token info and logprob
-                position_data = []
-                for token_id, logprob_obj in token_position_logprobs.items():
-                    position_data.append({
-                        'token_id': token_id,
-                        'logprob': logprob_obj.logprob,
-                        'decoded_token': logprob_obj.decoded_token
-                    })
-                token_logprobs.append(position_data)
-
-        batch_logprobs[inst_id] = token_logprobs
-
-    return batch_responses, batch_logprobs   
+    return batch_responses
 
 def downaload_model():
     from huggingface_hub import snapshot_download
@@ -137,43 +121,40 @@ def save_batch_responses_json(batches_responses, save_path):
 
     print(f"Saved responses to {save_path}")
 
-def save_batch_logprobs_json(batches_logprobs, save_path):
-    import json
-
-    all_logprobs = {}
-    for batch_logprobs in batches_logprobs:
-        all_logprobs.update(batch_logprobs)
-
-    with open(save_path, 'w') as f:
-        json.dump(all_logprobs, f, indent=4)
-
-    print(f"Saved logprobs to {save_path}")
-
 def argument_parser():
     parser = argparse.ArgumentParser(description="OmniSQL Runner")
-    parser.add_argument('--data_path', type=str, required=True, help='Path to the dataset file')
+    parser.add_argument('--data-path', type=str, required=True, help='Path to the dataset file')
     # dialect
     parser.add_argument('--dialect', type=str, default='sqlite', help='SQL dialect to use (default: sqlite)')
     # dataloader params
-    parser.add_argument('--batch_size', type=int, default=4, help='Batch size for DataLoader (default: 4)')
+    parser.add_argument('--batch-size', type=int, default=4, help='Batch size for DataLoader (default: 4)')
     # do all in one batch
-    parser.add_argument('--all_in_one_batch', action='store_true', help='Process all data in one batch (default: False)')
-    parser.add_argument('--num_workers', type=int, default=2, help='Number of workers for DataLoader (default: 2)')
+    parser.add_argument('--all-in-one-batch', action='store_true', help='Process all data in one batch (default: False)')
+    parser.add_argument('--num-workers', type=int, default=2, help='Number of workers for DataLoader (default: 2)')
+    parser.add_argument('--num-tensor-parallel', type=int, default=1, help='Number of tensor parallelism (default: 1)')
     # # is shuffle
     parser.add_argument('--shuffle', action='store_true', help='Whether to shuffle the dataset (default: False)') 
     # temperature, frequency_penalty, presence_penalty
     parser.add_argument('--temp', type=float, default=0.2, help='Temperature for model generation (default: 0.2)')
     parser.add_argument('--fp', type=float, default=0.0, help='Frequency penalty for model generation (default: 0.0)')
     parser.add_argument('--pp', type=float, default=0.0, help='Presence penalty for model generation (default: 0.0)')
+    parser.add_argument('--logprobs', type=int, default=5, help='Number of logprobs to return (default: 5)')
     # add model path
-    parser.add_argument('--model_path', type=str, default='./models/OmniSQL-7B', help='Path to the OmniSQL model (default: ./models/OmniSQL-7B)')
+    parser.add_argument('--model-path', type=str, default='./models/OmniSQL-7B', help='Path to the OmniSQL model (default: ./models/OmniSQL-7B)')
+    # save directory
+    parser.add_argument('--save-dir', type=str, default='./omisql_results', help='Directory to save results (default: ./omisql_results)')
     # add examples to help
     parser.epilog = '''Example usage: \n
-    python omnisql_runner.py --data_path ./Data/v3_claude/bird_set_stratified \
-          --model_path ./models/OmniSQL-7B \
-          --dialect sqlite --batch_size 4 \
-          --num_workers 2 --shuffle --temp 0.2 --fp 0.0 --pp 0.0
-    ''' 
+    python omnisql_runner.py --data-path ./Data/v3_claude/bird_set_stratified \
+          --model-path ./models/OmniSQL-7B \
+            --save-dir ./omisql_results \
+            --batch-size 4 \
+            --temp 0.2 \
+            --fp 0.0 \
+            --pp 0.0 \
+            --logprobs 5
+            --num-tensor-parallel 1
+    '''
     
     return parser
 
@@ -185,9 +166,14 @@ def main():
     model_path = args.model_path
     dialect = args.dialect 
 
+    # make save directory if not exists
+    if not os.path.exists(args.save_dir):
+        os.makedirs(args.save_dir)
+
     temperature = args.temp
     frequency_penalty = args.fp
     presence_penalty = args.pp
+    logprobs = args.logprobs
 
     prompt_template = OmniSQLPromptTemplate()
 
@@ -209,7 +195,7 @@ def main():
     llm = LLM(
         model = model_path,
         dtype = "float16", 
-        tensor_parallel_size = 1,
+        tensor_parallel_size = args.num_tensor_parallel,
         max_model_len = 8192,
         gpu_memory_utilization = 0.92,
         swap_space = 1,
@@ -223,7 +209,7 @@ def main():
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
         max_tokens=2048,
-        logprobs=5  # Return top 5 logprobs for each token
+        logprobs=logprobs 
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -242,20 +228,12 @@ def main():
         batches_logprobs.append(batch_logprobs)
 
         # Save batch responses
-        save_path = os.path.join(f"omisql_responses_batch_{batch_idx}.json")
+        save_path = os.path.join(args.save_dir, f"omisql_responses_batch_{batch_idx}.json")
         save_batch_responses_json([batch_responses], save_path)
 
-        # Save batch logprobs
-        logprobs_save_path = os.path.join(f"omisql_logprobs_batch_{batch_idx}.json")
-        save_batch_logprobs_json([batch_logprobs], logprobs_save_path)
-
     # Save all responses
-    save_path = os.path.join("omisql_responses.json")
+    save_path = os.path.join(args.save_dir, f"omisql_responses_all_batches.json")
     save_batch_responses_json(batches_reposenses, save_path)
-
-    # Save all logprobs
-    logprobs_save_path = os.path.join("omisql_logprobs.json")
-    save_batch_logprobs_json(batches_logprobs, logprobs_save_path)
 
 if __name__ == "__main__":
     main()
