@@ -1,0 +1,78 @@
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
+
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    wget \
+    curl \
+    build-essential \
+    openssh-server \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configure SSH AFTER installing openssh-server
+RUN mkdir -p /var/run/sshd && \
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+
+RUN pip install --upgrade pip setuptools wheel
+
+RUN pip install \
+    vllm \
+    kaggle \
+    pandas \
+    wandb \
+    sqlparse \
+    transformers \
+    datasets \
+    accelerate \
+    bitsandbytes \
+    peft
+
+RUN pip install hf_transfer
+
+# install jupyter and ipykernel
+RUN pip install jupyter jupyterlab notebook ipykernel && \
+    python -m ipykernel install --user --name=python3 --display-name="Python 3"
+
+# Set working directory
+WORKDIR /workspace
+
+COPY src/ /workspace/src/
+COPY pipeline /workspace/pipeline/
+COPY tests/ /workspace/tests/
+COPY omnisql_runner.py /workspace/omnisql_runner.py
+COPY .gitignore /workspace/.gitignore
+
+RUN mkdir -p /workspace/Data 
+
+# Set permissions
+RUN chmod +x /workspace/omnisql_runner.py
+
+# Expose ports
+EXPOSE 8888 22
+
+# Create Jupyter config
+RUN mkdir -p /root/.jupyter && \
+    echo "c.ServerApp.allow_origin = '*'\n\
+c.ServerApp.disable_check_xsrf = True\n\
+c.NotebookApp.allow_origin = '*'\n\
+c.NotebookApp.disable_check_xsrf = True\n\
+c.ServerApp.ip = '0.0.0.0'\n\
+c.ServerApp.port = 8888\n\
+c.ServerApp.open_browser = False\n\
+c.ServerApp.allow_root = True\n\
+c.ServerApp.token = ''\n\
+c.ServerApp.password = ''\n\
+c.LabApp.tornado_settings = {'headers': {'Content-Security-Policy': \"frame-ancestors * 'self'\"}}\n\
+" > /root/.jupyter/jupyter_lab_config.py
+
+# Create startup script
+RUN echo '#!/bin/bash\n\
+set -e\n\
+service ssh start\n\
+echo "SSH started on port 22"\n\
+echo "Starting Jupyter Lab on port 8888..."\n\
+exec jupyter lab\n\
+' > /start.sh && chmod +x /start.sh
+
+CMD ["/bin/bash"]

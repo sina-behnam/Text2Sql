@@ -18,7 +18,6 @@ class HuggingFaceConfig(ModelConfig):
     do_sample: bool = Field(default=True, description="Whether to use sampling for generation")
 
     class Config:
-        frozen = True
         extra = "forbid"
 
 
@@ -97,16 +96,15 @@ class HuggingFaceProvider(ModelProvider):
         'default': []
     }
 
-    def __init__(self, model_name: str, config: Optional[HuggingFaceConfig] = None, **config_kwargs):
+    def __init__(self, model_name: str, **config_kwargs):
         """
         Initialize the HuggingFace model provider.
 
         Args:
             model_name: Name or path of the pre-trained model
-            config: Optional HuggingFaceConfig instance
-            config_kwargs: Additional keyword arguments for configuration
+            config_kwargs: Configuration parameters
         """
-        super().__init__(model_name, config=config, **config_kwargs)
+        super().__init__(model_name, **config_kwargs)
 
         # Detect model family
         self.model_family = self._detect_model_family(model_name)
@@ -117,10 +115,7 @@ class HuggingFaceProvider(ModelProvider):
                 self.model_family,
                 self.DEFAULT_STOP_SEQUENCES['default']
             )
-            # Create a new config with stop sequences
-            config_dict = self.config.model_dump()
-            config_dict['stop_sequences'] = stop_sequences
-            self.config = HuggingFaceConfig(**config_dict)
+            self.config.stop_sequences = stop_sequences
 
         # Determine device
         if self.config.device == "auto":
@@ -544,15 +539,11 @@ class HuggingFaceProvider(ModelProvider):
         Args:
             **kwargs: Parameters to update (temperature, top_p, max_tokens, etc.)
         """
-        # deprecated method - update_config
         warnings.warn(
-                "update_generation_config is deprecated. Use update_config instead.",
-                DeprecationWarning
+            "update_generation_config is deprecated. Use update_config instead.",
+            DeprecationWarning
         )
-
-        config_dict = self.config.model_dump()
-        config_dict.update(kwargs)
-        self.config = HuggingFaceConfig(**config_dict)
+        self.update_config(**kwargs)
 
         # Update stop token IDs if stop_sequences changed
         if 'stop_sequences' in kwargs:

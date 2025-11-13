@@ -21,7 +21,6 @@ class OpenAIProvider(ModelProvider):
         model_name: str,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        config: Optional[OpenAIConfig] = None,
         **config_kwargs
     ):
         """
@@ -35,18 +34,9 @@ class OpenAIProvider(ModelProvider):
                      - "https://api.openai.com/v1" (OpenAI)
                      - "http://localhost:8000/v1" (vLLM local server)
                      - "https://api.together.xyz/v1" (Together.ai)
-            config: Optional OpenAIConfig instance
-            config_kwargs: Additional keyword arguments for configuration
+            config_kwargs: Configuration parameters
         """
-        super().__init__(model_name, config=config, **config_kwargs)
-
-        # Handle config initialization (same pattern as Arctic)
-        if config is not None:
-            self.config = config
-        elif config_kwargs:
-            self.config = OpenAIConfig(**config_kwargs)
-        else:
-            self.config = OpenAIConfig()
+        super().__init__(model_name, **config_kwargs)
 
         # Get API key from parameter or environment
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")

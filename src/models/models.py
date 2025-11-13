@@ -27,7 +27,6 @@ class ModelConfig(BaseModel):
     presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0, description="Presence penalty")
 
     class Config:
-        frozen = True
         extra = "forbid"
 
 class TogetherAIConfig(ModelConfig):
@@ -37,17 +36,10 @@ class TogetherAIConfig(ModelConfig):
 class ModelProvider:
     """Base class with config as class attribute"""
     config_class = ModelConfig  # Override in subclasses
-    
-    def __init__(self, model_name: str, config: Optional[ModelConfig] = None, **config_kwargs):
+
+    def __init__(self, model_name: str, **config_kwargs):
         self.model_name = model_name
-        
-        # Use provided config, or create from kwargs, or use defaults
-        if config is not None:
-            self.config = config
-        elif config_kwargs:
-            self.config = self.config_class(**config_kwargs)
-        else:
-            self.config = self.config_class()  # Use defaults
+        self.config = self.config_class(**config_kwargs)
 
     
     def generate(self, system_message: str, user_message: str, assistant_message: str = "") -> str:
@@ -93,13 +85,13 @@ class ModelProvider:
     def update_config(self, **config_kwargs):
         """
         Update the model configuration with new parameters.
-        
+
         Args:
             config_kwargs: Configuration parameters to update
-            
-        Returns:
-            None
         """
-        updated_config = self.config.model_copy(update=config_kwargs)
-        self.config = updated_config
+        for key, value in config_kwargs.items():
+            if hasattr(self.config, key):
+                setattr(self.config, key, value)
+            else:
+                raise ValueError(f"Invalid config parameter: {key}")
 

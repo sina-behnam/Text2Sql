@@ -16,7 +16,6 @@ class VLLMConfig(ModelConfig):
     enforce_eager: bool = Field(default=False, description="Use eager execution instead of CUDA graphs")
 
     class Config:
-        frozen = True
         extra = "forbid"
 
 
@@ -35,16 +34,15 @@ class VLLMProvider(ModelProvider):
         'default': []
     }
 
-    def __init__(self, model_name: str, config: Optional[VLLMConfig] = None, **config_kwargs):
+    def __init__(self, model_name: str, **config_kwargs):
         """
         Initialize the vLLM model provider.
 
         Args:
             model_name: Name or path of the pre-trained model
-            config: Optional VLLMConfig instance
-            config_kwargs: Additional keyword arguments for configuration
+            config_kwargs: Configuration parameters
         """
-        super().__init__(model_name, config=config, **config_kwargs)
+        super().__init__(model_name, **config_kwargs)
 
         # Detect model family
         self.model_family = self._detect_model_family(model_name)
@@ -55,10 +53,7 @@ class VLLMProvider(ModelProvider):
                 self.model_family,
                 self.DEFAULT_STOP_SEQUENCES['default']
             )
-            # Create a new config with stop sequences
-            config_dict = self.config.model_dump()
-            config_dict['stop_sequences'] = stop_sequences
-            self.config = VLLMConfig(**config_dict)
+            self.config.stop_sequences = stop_sequences
 
         # Initialize vLLM engine
         vllm_kwargs = {
@@ -85,9 +80,11 @@ class VLLMProvider(ModelProvider):
             top_p=self.config.top_p,
             max_tokens=self.config.max_tokens,
             presence_penalty=self.config.presence_penalty,
-            frequency_penalty=self.config.frequency_penalty,
-            stop=self.config.stop_sequences if self.config.stop_sequences else None
+            frequency_penalty=self.config.frequency_penalty
         )
+
+        if self.config.stop_sequences:
+            self.sampling_params.stop = self.config.stop_sequences
 
     def _detect_model_family(self, model_name: str) -> str:
         """Detect the model family from the model name"""
@@ -284,20 +281,23 @@ class VLLMProvider(ModelProvider):
 
     def update_sampling_params(self, **kwargs):
         """Update sampling parameters dynamically"""
-        # deprecated: use the update_config method instead
         warnings.warn(
             "update_sampling_params is deprecated. Use update_config instead.",
             DeprecationWarning
         )
+        self.update_config(**kwargs)
 
-        current_params = {
-            'seed': self.config.seed,
-            'temperature': self.config.temperature,
-            'top_p': self.config.top_p,
-            'max_tokens': self.config.max_tokens,
-            'presence_penalty': self.config.presence_penalty,
-            'frequency_penalty': self.config.frequency_penalty,
-            'stop': self.config.stop_sequences if self.config.stop_sequences else None
-        }
-        current_params.update(kwargs)
-        self.sampling_params = SamplingParams(**current_params)
+        # Recreate sampling params with updated config
+        self.sampling_params = SamplingParams(
+            seed=self.config.seed,
+            temperature=self.config.temperature,
+            top_p=self.config.top_p,
+            max_tokens=self.config.max_tokens,
+            presence_penalty=self.config.presence_penalty,
+            frequency_penalty=self.config.frequency_penalty
+        )
+
+        if self.config.stop_sequences:
+            self.sampling_params.stop = self.config.stop_sequences
+        
+
