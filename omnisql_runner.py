@@ -60,6 +60,25 @@ class OmniSQLPromptTemplate(BasePromptTemplate):
             return self._clean_sql(sql)
         
         return None
+    
+def process_logprobs(logprobs, num_logprobs):
+
+    if logprobs is None:
+        return None
+    
+    _logprobs = []
+    for token_logprobs in logprobs:
+        ranked_tokens = {}
+        for token_id, token_logprob in token_logprobs.items():
+            ranked_tokens[token_id] = {
+                "prob" : token_logprob.logprob,
+                "decoded_token" : token_logprob.decoded_token
+            }
+        _logprobs.append(ranked_tokens)
+
+    return _logprobs
+        
+            
 
 def generate_batch(batched_instances, llm ,tokenizer, sampling_params):
     # Extract instance IDs and user messages
@@ -87,7 +106,7 @@ def generate_batch(batched_instances, llm ,tokenizer, sampling_params):
         batch_responses[inst_id] = {
             "text" : generated_output.text,
             "token_ids" : generated_output.token_ids,
-            "logprobs" : generated_output.logprobs
+            "logprobs" : process_logprobs(generated_output.logprobs, sampling_params.logprobs)
         }
 
     return batch_responses
@@ -113,13 +132,8 @@ def save_batch_responses_json(batches_responses, save_path):
     import json
 
     all_responses = {}
-    for batch_response in batches_responses:
-        all_responses.update(batch_response)
-
-    with open(save_path, 'w') as f:
-        json.dump(all_responses, f, indent=4)
-
-    print(f"Saved responses to {save_path}")
+    for batch_responses in batches_responses:
+        all_responses.update(batch_responses)
 
 def argument_parser():
     parser = argparse.ArgumentParser(description="OmniSQL Runner")
@@ -218,14 +232,12 @@ def main():
     print("Model Sampling Parameters:", sampling_params)
 
     batches_reposenses = []
-    batches_logprobs = []
 
     for batch_idx, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc="Processing Batches"):
 
-        batch_responses, batch_logprobs = generate_batch(batch, llm, tokenizer, sampling_params)
+        batch_responses = generate_batch(batch, llm, tokenizer, sampling_params)
 
         batches_reposenses.append(batch_responses)
-        batches_logprobs.append(batch_logprobs)
 
         # Save batch responses
         save_path = os.path.join(args.save_dir, f"omisql_responses_batch_{batch_idx}.json")
