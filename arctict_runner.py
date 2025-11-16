@@ -30,12 +30,18 @@ def generate_batch(batched_instances, llm ,tokenizer, sampling_params):
     # Extract instance IDs and user messages
     instances_ids = batched_instances['instance_id'].detach().cpu().tolist()
     user_messages = batched_instances['user_message']
+    system_messages = batched_instances['system_message']
+    assistant_prefix = batched_instances['assistant_prefix']
         
     # Generate chat prompts for all instances
     chat_prompts = []
-    for user_message in user_messages:
+    for user_message, system_message, assis_prefix in zip(user_messages, system_messages, assistant_prefix):
         chat_prompt = tokenizer.apply_chat_template(
-            [{"role": "user", "content": user_message}],
+            [   
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": assis_prefix}
+            ],
             add_generation_prompt=True, 
             tokenize=False
         )
@@ -81,7 +87,7 @@ def save_batch_responses_json(batches_responses, save_path):
         all_responses.update(batch_responses)
 
 def argument_parser():
-    parser = argparse.ArgumentParser(description="OmniSQL Runner")
+    parser = argparse.ArgumentParser(description="Arctic Runner")
     parser.add_argument('--data-path', type=str, required=True, help='Path to the dataset file')
     # dialect
     parser.add_argument('--dialect', type=str, default='sqlite', help='SQL dialect to use (default: sqlite)')
@@ -99,20 +105,12 @@ def argument_parser():
     parser.add_argument('--pp', type=float, default=0.0, help='Presence penalty for model generation (default: 0.0)')
     parser.add_argument('--logprobs', type=int, default=5, help='Number of logprobs to return (default: 5)')
     # add model path
-    parser.add_argument('--model-path', type=str, default='./models/OmniSQL-7B', help='Path to the OmniSQL model (default: ./models/OmniSQL-7B)')
+    parser.add_argument('--model-path', type=str, default='./models/Arctic-7B', help='Path to the Arctic model (default: ./models/Arctic-7B)')
     # save directory
-    parser.add_argument('--save-dir', type=str, default='./omisql_results', help='Directory to save results (default: ./omisql_results)')
+    parser.add_argument('--save-dir', type=str, default='./arctic_results', help='Directory to save results (default: ./arctic_results)')
     # add examples to help
     parser.epilog = '''Example usage: \n
-    python omnisql_runner.py --data-path ./Data/v3_claude/bird_set_stratified \
-          --model-path ./models/OmniSQL-7B \
-            --save-dir ./omisql_results \
-            --batch-size 4 \
-            --temp 0.2 \
-            --fp 0.0 \
-            --pp 0.0 \
-            --logprobs 5
-            --num-tensor-parallel 1
+    python arctict_runner.py --data-path ./data/bird_dev.json --dialect sqlite --batch-size 4 --temp 0.2 --fp 0.0 --pp 0.0 --model-path ./models/Arctic-Text2SQL-R1-7B --save-dir ./arctic_results
     '''
     
     return parser
@@ -185,11 +183,11 @@ def main():
         batches_reposenses.append(batch_responses)
 
         # Save batch responses
-        save_path = os.path.join(args.save_dir, f"omisql_responses_batch_{batch_idx}.json")
+        save_path = os.path.join(args.save_dir, f"arctic_responses_batch_{batch_idx}.json")
         save_batch_responses_json([batch_responses], save_path)
 
     # Save all responses
-    save_path = os.path.join(args.save_dir, f"omisql_responses_all_batches.json")
+    save_path = os.path.join(args.save_dir, f"arctic_responses_all_batches.json")
     save_batch_responses_json(batches_reposenses, save_path)
 
 if __name__ == "__main__":
