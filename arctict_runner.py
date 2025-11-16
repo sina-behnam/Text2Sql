@@ -115,50 +115,43 @@ def argument_parser():
     
     return parser
 
-def main():
+# At the end of arctic_runner.py, replace the if __name__ == "__main__" section:
 
-    args = argument_parser().parse_args()
-
-    data_path = args.data_path
-    model_path = args.model_path
-    dialect = args.dialect 
-
+def run_arctic(data_path, model_path, dialect='sqlite', batch_size=4, 
+               temperature=0.2, frequency_penalty=0.0, presence_penalty=0.0,
+               logprobs=5, save_dir='./arctic_results', num_tensor_parallel=1,
+               shuffle=False, num_workers=2, all_in_one_batch=False):
+    """Run Arctic inference with given parameters"""
+    
     # make save directory if not exists
-    if not os.path.exists(args.save_dir):
-        os.makedirs(args.save_dir)
-
-    temperature = args.temp
-    frequency_penalty = args.fp
-    presence_penalty = args.pp
-    logprobs = args.logprobs
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
     prompt_template = ArcticText2SQLTemplate()
-
     dataset = Text2SQLDataset(data_path, template=prompt_template, dialect=dialect)
 
-    batch_size = args.batch_size
-    if args.all_in_one_batch:
+    if all_in_one_batch:
         batch_size = len(dataset)
 
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=args.shuffle,
-        num_workers=args.num_workers
+        shuffle=shuffle,
+        num_workers=num_workers
     )
 
     print("Dataset loaded. Number of samples:", len(dataset))
 
     llm = LLM(
-        model = model_path,
-        dtype = "float16", 
-        tensor_parallel_size = args.num_tensor_parallel,
-        max_model_len = 8192,
-        gpu_memory_utilization = 0.92,
-        swap_space = 1,
-        enforce_eager = True,
-        disable_custom_all_reduce = True,
-        trust_remote_code = True
+        model=model_path,
+        dtype="float16", 
+        tensor_parallel_size=num_tensor_parallel,
+        max_model_len=8192,
+        gpu_memory_utilization=0.92,
+        swap_space=1,
+        enforce_eager=True,
+        disable_custom_all_reduce=True,
+        trust_remote_code=True
     )
 
     sampling_params = SamplingParams(
@@ -174,24 +167,35 @@ def main():
     print("Model and tokenizer loaded.")
     print("Model Sampling Parameters:", sampling_params)
 
-    batches_reposenses = []
+    batches_responses = []
 
     for batch_idx, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc="Processing Batches"):
-
         batch_responses = generate_batch(batch, llm, tokenizer, sampling_params)
-
-        batches_reposenses.append(batch_responses)
+        batches_responses.append(batch_responses)
 
         # Save batch responses
-        save_path = os.path.join(args.save_dir, f"arctic_responses_batch_{batch_idx}.json")
+        save_path = os.path.join(save_dir, f"arctic_responses_batch_{batch_idx}.json")
         save_batch_responses_json([batch_responses], save_path)
 
     # Save all responses
-    save_path = os.path.join(args.save_dir, f"arctic_responses_all_batches.json")
-    save_batch_responses_json(batches_reposenses, save_path)
+    save_path = os.path.join(save_dir, f"arctic_responses_all_batches.json")
+    save_batch_responses_json(batches_responses, save_path)
+
 
 if __name__ == "__main__":
-    main()
-
-
-# next(iter(dataloader))
+    args = argument_parser().parse_args()
+    run_arctic(
+        data_path=args.data_path,
+        model_path=args.model_path,
+        dialect=args.dialect,
+        batch_size=args.batch_size,
+        temperature=args.temp,
+        frequency_penalty=args.fp,
+        presence_penalty=args.pp,
+        logprobs=args.logprobs,
+        save_dir=args.save_dir,
+        num_tensor_parallel=args.num_tensor_parallel,
+        shuffle=args.shuffle,
+        num_workers=args.num_workers,
+        all_in_one_batch=args.all_in_one_batch
+    )
