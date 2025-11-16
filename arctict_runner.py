@@ -2,7 +2,6 @@ import os
 import sys
 from src.utils.templates.arctic import ArcticText2SQLTemplate
 from vllm import LLM, SamplingParams
-from transformers import AutoTokenizer
 from src.dataloader import DataLoader, Text2SQLDataset
 import argparse
 from tqdm import tqdm
@@ -85,6 +84,12 @@ def save_batch_responses_json(batches_responses, save_path):
     all_responses = {}
     for batch_responses in batches_responses:
         all_responses.update(batch_responses)
+    
+    # Actually write to file
+    with open(save_path, 'w') as f:
+        json.dump(all_responses, f, indent=2)
+    
+    print(f"Saved responses to {save_path}")
 
 def argument_parser():
     parser = argparse.ArgumentParser(description="Arctic Runner")
@@ -162,7 +167,7 @@ def run_arctic(data_path, model_path, dialect='sqlite', batch_size=4,
         logprobs=logprobs 
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = llm.get_tokenizer(trust_remote_code=True)
 
     print("Model and tokenizer loaded.")
     print("Model Sampling Parameters:", sampling_params)
