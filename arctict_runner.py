@@ -167,7 +167,7 @@ def run_arctic(data_path, model_path, dialect='sqlite', batch_size=4,
         logprobs=logprobs 
     )
 
-    tokenizer = llm.get_tokenizer(trust_remote_code=True)
+    tokenizer = llm.get_tokenizer()
 
     print("Model and tokenizer loaded.")
     print("Model Sampling Parameters:", sampling_params)
