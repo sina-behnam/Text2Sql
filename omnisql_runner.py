@@ -133,6 +133,12 @@ def save_batch_responses_json(batches_responses, save_path):
     for batch_responses in batches_responses:
         all_responses.update(batch_responses)
 
+    # Actually write to file
+    with open(save_path, 'w') as f:
+        json.dump(all_responses, f, indent=2)
+    
+    print(f"Saved responses to {save_path}")
+
 def argument_parser():
     parser = argparse.ArgumentParser(description="OmniSQL Runner")
     parser.add_argument('--data-path', type=str, required=True, help='Path to the dataset file')
@@ -170,36 +176,33 @@ def argument_parser():
     
     return parser
 
-def main():
-
-    args = argument_parser().parse_args()
-
-    data_path = args.data_path
-    model_path = args.model_path
-    dialect = args.dialect 
+def run_omnisql(data_path, model_path, dialect, batch_size, 
+                temperature, frequency_penalty, presence_penalty,
+                logprobs, save_dir, num_tensor_parallel,
+                shuffle, num_workers, all_in_one_batch):
 
     # make save directory if not exists
-    if not os.path.exists(args.save_dir):
-        os.makedirs(args.save_dir)
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
-    temperature = args.temp
-    frequency_penalty = args.fp
-    presence_penalty = args.pp
-    logprobs = args.logprobs
+    temperature = temperature
+    frequency_penalty = frequency_penalty
+    presence_penalty = presence_penalty
+    logprobs = logprobs
 
     prompt_template = OmniSQLPromptTemplate()
 
     dataset = Text2SQLDataset(data_path, template=prompt_template, dialect=dialect)
 
-    batch_size = args.batch_size
-    if args.all_in_one_batch:
+    batch_size = batch_size
+    if all_in_one_batch:
         batch_size = len(dataset)
 
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=args.shuffle,
-        num_workers=args.num_workers
+        shuffle=shuffle,
+        num_workers=num_workers
     )
 
     print("Dataset loaded. Number of samples:", len(dataset))
@@ -207,7 +210,7 @@ def main():
     llm = LLM(
         model = model_path,
         dtype = "float16", 
-        tensor_parallel_size = args.num_tensor_parallel,
+        tensor_parallel_size = num_tensor_parallel,
         max_model_len = 8192,
         gpu_memory_utilization = 0.92,
         swap_space = 1,
@@ -238,15 +241,35 @@ def main():
         batches_reposenses.append(batch_responses)
 
         # Save batch responses
-        save_path = os.path.join(args.save_dir, f"omisql_responses_batch_{batch_idx}.json")
-        save_batch_responses_json([batch_responses], save_path)
+        # save_path = os.path.join(save_dir, f"omisql_responses_batch_{batch_idx}.json")
+        # save_batch_responses_json([batch_responses], save_path)
 
     # Save all responses
-    save_path = os.path.join(args.save_dir, f"omisql_responses_all_batches.json")
+    save_path = os.path.join(save_dir, f"omisql_responses_all_batches.json")
     save_batch_responses_json(batches_reposenses, save_path)
 
+
 if __name__ == "__main__":
-    main()
+
+    parser = argument_parser()
+    args = parser.parse_args()
+
+    run_omnisql(
+        data_path=args.data_path,
+        model_path=args.model_path,
+        dialect=args.dialect,
+        batch_size=args.batch_size,
+        temperature=args.temp,
+        frequency_penalty=args.fp,
+        presence_penalty=args.pp,
+        logprobs=args.logprobs,
+        save_dir=args.save_dir,
+        num_tensor_parallel=args.num_tensor_parallel,
+        shuffle=args.shuffle,
+        num_workers=args.num_workers,
+        all_in_one_batch=args.all_in_one_batch
+    )
+    
 
 
 # next(iter(dataloader))
