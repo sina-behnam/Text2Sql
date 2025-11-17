@@ -94,7 +94,7 @@ class DefaultPromptTemplate(BasePromptTemplate):
 
         return sql.strip()
 
-    def extract_sql_2(self, response_text: str, clean: bool = True) -> str:
+    def extract_sql(self, response_text: str, clean: bool = True) -> str:
         """
         Generic SQL extraction method that can be used by subclasses.
 
