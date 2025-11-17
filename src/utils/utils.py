@@ -9,7 +9,7 @@ import re
 from typing import Dict, List, Optional, Tuple, Any, Union
 from pathlib import Path
 from dataclasses import dataclass, asdict
-from utils.sql.sql_executors import check_execution_accuracy_full
+from sql.sql_executors import check_execution_accuracy_full
 
 def get_db_path(instance, instance_path: str = None) -> str:
     """Get database path based on type"""

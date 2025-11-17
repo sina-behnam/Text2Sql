@@ -219,35 +219,39 @@ def check_execution_accuracy_full(
             return False, f"SKIPPED: {reason} (risk={risk})"
     
     # Execute ground truth
+    gt_t1 = time.time()
     success, gt_result, error = execute_with_timeout(
         db_path, ground_truth_sql, timeout_seconds, max_rows
     )
+    gt_t2 = time.time()
     if not success:
-        return False, f"Ground truth failed: {error}"
+        return False, f"Ground truth failed: {error}", (gt_t2 - gt_t1, 0)
     
     # Execute predicted
+    pred_t1 = time.time()
     success, pred_result, error = execute_with_timeout(
         db_path, predicted_sql, timeout_seconds, max_rows
     )
+    pred_t2 = time.time()
     if not success:
-        return False, f"Predicted failed: {error}"
+        return False, f"Predicted failed: {error}", (gt_t2 - gt_t1, pred_t2 - pred_t1)
     
     # Compare
     if pred_result == gt_result:
-        return True, ""
+        return True, "", (gt_t2 - gt_t1, pred_t2 - pred_t1)
     
     if len(pred_result) == 0 and len(gt_result) == 0:
-        return True, ""
+        return True, "", (gt_t2 - gt_t1, pred_t2 - pred_t1)
     
     if len(pred_result) != len(gt_result):
-        return False, ""
+        return False, "", (gt_t2 - gt_t1, pred_t2 - pred_t1)
     
     if pred_result and gt_result:
         if len(pred_result[0]) != len(gt_result[0]):
-            return False, ""
+            return False, "", (gt_t2 - gt_t1, pred_t2 - pred_t1)
     
     # Normalized
     pred_set = set(tuple(row) for row in pred_result)
     gt_set = set(tuple(row) for row in gt_result)
     
-    return (pred_set == gt_set), ""
+    return (pred_set == gt_set), "", (gt_t2 - gt_t1, pred_t2 - pred_t1)
