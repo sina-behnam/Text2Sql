@@ -161,7 +161,7 @@ def run_metallama(data_path, model_path, dialect='sqlite', batch_size=4,
         temperature=temperature,
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
-        max_tokens=2048,
+        max_tokens=1024,
         logprobs=logprobs 
     )
 

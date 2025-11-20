@@ -176,10 +176,10 @@ def argument_parser():
     
     return parser
 
-def run_omnisql(data_path, model_path, dialect, batch_size, 
+def run_omnisql(data_path, model_path, batch_size, 
                 temperature, frequency_penalty, presence_penalty,
-                logprobs, save_dir, num_tensor_parallel,
-                shuffle, num_workers, all_in_one_batch):
+                logprobs, save_dir, num_tensor_parallel=1, dialect='sqlite',
+                shuffle=False, num_workers=2, all_in_one_batch=False):
 
     # make save directory if not exists
     if not os.path.exists(save_dir):
