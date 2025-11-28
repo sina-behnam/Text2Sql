@@ -1,201 +1,193 @@
-import time
-from statistics import median
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import List, Dict, Tuple
-from dataclasses import dataclass
-from sqlalchemy import create_engine, text, pool
-from tqdm import tqdm
-import sqlalchemy
+"""
+There are two type of execution can happen 
+
+1. Batch execution, which is a set of queries that all belong to one database. And this happen in Parallel ... 
+
+2. Single execution. (just simple executing a query)
+
+But since we need to calculate VES which basically executing each query multiple times 
+    to record what is the average execution time.
+
+    
+"""
+from typing import List, Tuple
+from src.evaluation.metrics.workers.sql_worker import SQLWorker, ExecutionResult
+from src.evaluation.metrics.metric import Metric, MetricType
+from src.evaluation.metrics.exec_accuracy import ExecAccuracy
+import json
+from collections import defaultdict
 import numpy as np
-import logging
 from pathlib import Path
-import signal
+    
+class VES(Metric):
+    name: MetricType = MetricType.VALID_EFFICIENCY_SCORE
+    description: str = "Valid Efficiency Score (VES) metric for evaluating SQL query execution efficiency."
 
-LOG_DIR = Path(__file__).resolve().parent / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        cache_target_path: str = None,
+        sql_worker: SQLWorker = None,
+        *args,
+        **kwargs
+    ):
+        """Initialize the VES metric with optional target query execution caching.
+        
+        Args:
+            cache_target_path (str, optional): Path to cache file for target query results.
+            sql_worker (SQLWorker, optional): An instance of SQLWorker for executing queries.
+            *args: Additional arguments for SQLWorker initialization.
+            **kwargs: Additional keyword arguments for SQLWorker initialization.
+        """
+        
+        if sql_worker is not None:
+            self.sql_worker = sql_worker
+        else:
+            self.sql_worker = SQLWorker(*args, **kwargs)
 
-# ============= SQLAlchemy Logging (Existing) =============
-_sqlalchemy_handler = logging.FileHandler(LOG_DIR / "sqlalchemy.log", mode="w", encoding="utf-8")
-_sqlalchemy_handler.setFormatter(
-    logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-)
+        self.target_results = self._load_from_cache_file(cache_target_path) if cache_target_path is not None else None
+        
+        super().__init__()
 
-for name in ("sqlalchemy.engine", "sqlalchemy.pool"):
-    logger = logging.getLogger(name)
-    logger.handlers.clear()
-    logger.addHandler(_sqlalchemy_handler)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False  # Don't propagate to root (no console output)
+    @staticmethod
+    def _save_to_cache_file(cache_file_path: str, results: List[ExecutionResult]) -> None:
+        cache_dict = {}
+        for res in results:
+            cache_dict[str(res.query_id)] = {
+                'results': res.results,
+                'exec_time_ms': res.exec_time_ms,
+                'success': res.success,
+                'error': res.error
+            }
+        with open(cache_file_path, 'w') as f:
+            json.dump(cache_dict, f, indent=4, default=list)
 
+    @staticmethod
+    def _load_from_cache_file(cache_file_path: str) -> dict[str, ExecutionResult] | None:
 
-# ============= Your Custom Logging =============
-execution_logger = logging.getLogger("query_execution")  # Custom logger
-execution_logger.handlers.clear()  # Remove any existing handlers
+        if Path(cache_file_path).is_file():
+            results = {}
 
-# File handler only (no console)
-_execution_handler = logging.FileHandler(LOG_DIR / "execution.log", mode="w", encoding="utf-8")
-_execution_handler.setFormatter(
-    logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-)
+            try:
+                with open(cache_file_path, 'r') as f:
+                    cached_data = json.load(f)
+                for _id, v in cached_data.items():
+                    query_id = str(_id)
+                    obj = ExecutionResult(
+                        query_id=query_id,
+                        results=[tuple(row) for row in v['results']],
+                        exec_time_ms=v['exec_time_ms'],
+                        success=v['success'],
+                        error=v['error']
+                    )
+                    results[query_id] = obj
+            except Exception as e:
+                print(f"Error loading cached results: {e}")
+                return None
 
-execution_logger.addHandler(_execution_handler)
-execution_logger.setLevel(logging.INFO)  # Change to WARNING/ERROR if you want less
-execution_logger.propagate = False  # ← KEY: Prevents console output
+            return results
+        else:
+            return None
 
-def _remove_outliers(array: list[float]) -> list[float]:
-    mean, std = np.mean(array), np.std(array)
-    lower_bound = mean - 3 * std
-    upper_bound = mean + 3 * std
-    return [x for x in array if lower_bound <= x <= upper_bound]
+    @staticmethod
+    def _list_to_dict(results: List[ExecutionResult]) -> dict[str, ExecutionResult]:
+        result_dict = {}
+        for res in results:
+            result_dict[str(res.query_id)] = res
+        return result_dict
 
+    def _target_execution(
+        self,
+        target_queries: List[Tuple[str, str, str]],
+        cache_target_path: str = None,
+        cache_target: bool = True
+    ) -> dict[str, ExecutionResult]:
+        """Initialize the execution of target queries, possibly using cached results."""
+        if self.target_results is not None:
+            return self.target_results
+        
+        print("Executing target queries for VES computation...")
+        target_results = self._list_to_dict(self.sql_worker.execute_parallel(
+            target_queries
+        ))
 
-@dataclass
-class ExecutionResult:
-    query_id: str
-    results: List[Tuple]
-    exec_time_ms: float
-    success: bool
-    error: str = ""
+        if cache_target and cache_target_path is not None:
+            self._save_to_cache_file(cache_target_path, target_results)
+        
+        return target_results
 
-
-def batch_sql_query_worker(
-        db_url: str,
-        queries: List[Tuple[str, str]],  # List of (query_id, sql)
-        runs: int = 3,
-        timeout: int = 6,
-        max_try_timeout: int = 5
+    def compute_ves(
+        self,
+        prediction: List[Tuple[str, str, str]],
     ) -> List[ExecutionResult]:
+        """Compute the VES for a batch of SQL queries."""
 
-    _db_url = 'sqlite:///' + db_url if not db_url.startswith('sqlite:///') else db_url
-
-    try:
-        engine = create_engine(
-            _db_url,
-            poolclass=pool.NullPool,
-            connect_args={'check_same_thread': False} if 'sqlite' in db_url else {}
+        assert hasattr(self, 'target_results'), "Target results not initialized. Call _target_execution first."
+        
+        print("Executing predicted queries for VES computation...")
+        prediction_results = self.sql_worker.execute_parallel(
+            prediction
         )
         
-        results = []
-
-        with engine.connect() as connection:
-            raw_conn = connection.connection.dbapi_connection
-        
-            for query_id, sql in queries:
-                times_ms = []
-                final_results = None
-                _try_timeout = 0
-
-                for _ in range(runs):
-                    start_time = time.time()
-                    timed_out = False
-
-                    def progress_check():
-                        nonlocal timed_out
-                        if time.time() - start_time > timeout:
-                            timed_out = True
-                            return 1  # Non-zero cancels query
-                        return 0
-
-                    raw_conn.set_progress_handler(progress_check, 1000)
-
-                    try:
-                        t1 = time.perf_counter()
-                        result = connection.execute(text(sql))
-                        rows = result.fetchall()
-                        t2 = time.perf_counter()
-
-                        raw_conn.set_progress_handler(None, 0)
-
-                        if timed_out:
-                            raise TimeoutError("Query execution exceeded the time limit.")
-
-                        times_ms.append((t2 - t1) * 1000)
-                        final_results = rows
-
-                    except (TimeoutError, sqlalchemy.exc.OperationalError) as e:
-                        raw_conn.set_progress_handler(None, 0)
-                        
-                        if timed_out or "interrupt" in str(e).lower():
-                            try:
-                                connection.rollback()
-                            except:
-                                pass
-                            _try_timeout += 1
-
-                            if _try_timeout >= max_try_timeout:
-                                results.append(ExecutionResult(query_id, [], 0, False, "TimeoutError"))
-                                execution_logger.warning(f"Max timeouts ({max_try_timeout}) reached for query ID: {query_id}")
-                                break
-                            else:
-                                execution_logger.warning(f"TimeoutError for query ID: {query_id} (attempt {_try_timeout}/{max_try_timeout})")
-                                continue
-                        else:
-                            results.append(ExecutionResult(query_id, [], 0, False, str(e)))
-                            execution_logger.warning(f"Exception for query ID: {query_id}: {e}")
-                            break
-
-                    except sqlalchemy.exc.ResourceClosedError:
-                        raw_conn.set_progress_handler(None, 0)
-                        results.append(ExecutionResult(query_id, [], 0, False, "ResourceClosedError"))
-                        execution_logger.warning(f"ResourceClosedError for query ID: {query_id}")
-                        break
-                        
-                    except Exception as e:
-                        raw_conn.set_progress_handler(None, 0)
-                        try:
-                            connection.rollback()
-                        except:
-                            pass
-                        results.append(ExecutionResult(query_id, [], 0, False, str(e)))
-                        execution_logger.warning(f"Exception for query ID: {query_id}: {e}")
-                        break
-                
+        ves_scores = []
+        for pred_res in prediction_results:
+            target_res = self.target_results.get(str(pred_res.query_id), None)
+            if target_res is None or not target_res.success:
+                print(f"Target result for query ID {pred_res.query_id} not found or unsuccessful. Assigning VES score of 0.")
+                ves_score = 0.0
+            else:
+                if pred_res.success:
+                    ves_score = np.sqrt(target_res.exec_time_ms / pred_res.exec_time_ms) * ExecAccuracy._evalute_(target_res, pred_res)
                 else:
-                    execution_logger.info(f"Query ID {query_id} executed successfully in {np.mean(_remove_outliers(times_ms)):.2f} ms")
-                    results.append(ExecutionResult(
-                        query_id=query_id,
-                        results=final_results,
-                        exec_time_ms=np.mean(_remove_outliers(times_ms)),
-                        success=True
-                    ))
-
-        engine.dispose()
-        return results
-    
-    except Exception as e:
-        return [ExecutionResult(query_id, [], 0, False, str(e)) for query_id, _ in queries]
-
-
-def execute_queries_parallel(
-    queries: List[Dict],  
-    max_workers: int = 4,
-    runs_per_query: int = 100,
-    timeout: int = 6,
-    max_try_timeout: int = 5
-) -> List[ExecutionResult]:
-    """
-    Execute SQL queries in parallel using SQLAlchemy Core.
-    
-    Args:
-        queries: 
-        max_workers: CPU cores
-        runs_per_query: Runs for timing
-    """
-    results = []
-    
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                batch_sql_query_worker,
-                db_url=db_tuple[0][1], 
-                queries=db_tuple[1],
-                runs=runs_per_query,
-                timeout=timeout,
-                max_try_timeout=max_try_timeout
-            ) : db_tuple for db_tuple in queries.items()
-        }
+                    ves_score = 0.0
+            ves_scores.append((pred_res.query_id, ves_score))
         
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Executing queries"):
-            results.extend(future.result())
+        return ves_scores
     
-    return results
+    def compute_single(
+        self,
+        target: Tuple[str, str, str],
+        prediction: Tuple[str, str, str]
+    ) -> float:
+        """Compute VES score for a single target and prediction query pair."""
+        target_res = None
+        if self.target_results is not None:
+            print("Retrieving target result from cached results...")
+            target_res = self.target_results.get(str(prediction[1]), None)
+
+        if target_res is None:
+            target_res = self.sql_worker.execute_single(*target)
+
+        pred_res = self.sql_worker.execute_single(*prediction)
+        
+        if target_res is None or not target_res.success:
+            return 0.0
+        
+        if pred_res.success:
+            ves_score = np.sqrt(target_res.exec_time_ms / pred_res.exec_time_ms) * ExecAccuracy._evalute_(target_res, pred_res)
+        else:
+            ves_score = 0.0
+        
+        return ves_score
+    
+    def compute(self, target: List[Tuple[str, str, str]], prediction: List[Tuple[str, str, str]]) -> List[float]:
+        """Compute VES scores given target and prediction queries."""
+        if self.target_results is None:
+            self.target_results = self._target_execution(target_queries=target)
+        
+        ves_results = self.compute_ves(prediction=prediction)
+        ves_scores = [score for _, score in ves_results]
+        return ves_scores
+    
+    def compute_metric(self, metric_name: str, target: List[Tuple[str, str, str]], prediction: List[Tuple[str, str, str]]) -> List[float]:
+        """Compute a specific metric (VES) given target and prediction queries."""
+        if metric_name == MetricType.VALID_EFFICIENCY_SCORE:
+            return self.compute(target, prediction)
+        else:
+            raise ValueError(f"Unsupported metric name: {metric_name}")
+    
+
+
+
+        
+            
+        
