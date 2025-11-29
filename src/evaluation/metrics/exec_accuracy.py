@@ -4,7 +4,7 @@ There are two possible input can happen when initializing ExecAccuracy metric.
 1. Providing the list of queries to be executed for both target and prediction. In this case, the metric will execute the queries using the provided SQLWorker.
 2. Providing the executed results to check the execution accuracy directly.
 """
-from src.evaluation.metrics.workers.sql_worker import SQLWorker, ExecutionResult
+from src.workers.sql_worker import SQLWorker, ExecutionResult
 from src.evaluation.metrics.metric import Metric, MetricType
 from typing import List, Tuple
 

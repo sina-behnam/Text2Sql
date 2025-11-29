@@ -11,11 +11,10 @@ But since we need to calculate VES which basically executing each query multiple
     
 """
 from typing import List, Tuple
-from src.evaluation.metrics.workers.sql_worker import SQLWorker, ExecutionResult
+from src.workers.sql_worker import SQLWorker, ExecutionResult
 from src.evaluation.metrics.metric import Metric, MetricType
 from src.evaluation.metrics.exec_accuracy import ExecAccuracy
 import json
-from collections import defaultdict
 import numpy as np
 from pathlib import Path
     
