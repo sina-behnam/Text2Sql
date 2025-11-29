@@ -2,14 +2,8 @@ import os
 import json
 import sqlite3
 import sqlparse
-import pandas as pd
-import csv
-import logging
 import re
 from typing import Dict, List, Optional, Tuple, Any, Union
-from pathlib import Path
-from dataclasses import dataclass, asdict
-from sql.sql_executors import check_execution_accuracy_full
 
 def get_db_path(instance, instance_path: str = None) -> str:
     """Get database path based on type"""
@@ -29,23 +23,6 @@ def get_db_path(instance, instance_path: str = None) -> str:
     else:
         return None
     
-def check_execution_accuracy_general(predicted_sql: str,
-                                    ground_truth_sql: str,
-                                    db_type: str,
-                                    skip_unsafe: bool,
-                                    db_path: str):
-    if db_type == 'sqlite':
-        return check_execution_accuracy_full(
-            predicted_sql=predicted_sql,
-            ground_truth_sql=ground_truth_sql,
-            db_path=db_path,
-            skip_unsafe=skip_unsafe,
-        )
-    elif db_type == 'snowflake':
-        # Implement Snowflake execution accuracy check if needed
-        raise NotImplementedError("Snowflake execution accuracy check is not implemented yet.")
-    else:
-        raise ValueError(f"Unsupported database type: {db_type}")
 
 def get_db_connection(instance, instance_path: str = None, snowflake_creds: Dict[str, str] = None):
 
@@ -118,138 +95,6 @@ def check_sql_semantic_equivalence(model_provider,predicted_sql: str, ground_tru
         except Exception as e:
             # If the model call fails, default to relying on execution results
             return False, f"Error in semantic check: {str(e)}"
-
-def check_execution_accuracy_2(
-    predicted_sql: str, 
-    ground_truth_sql: str,
-    db_connection: sqlite3.Connection
-) -> Tuple[bool, str]:
-    """
-    Check if predicted SQL executes correctly and produces the same output as ground truth.
-    
-    Returns:
-        - (True, ""): Results match
-        - (False, "error message"): Execution failed with error
-        - (False, ""): Execution succeeded but results don't match (needs semantic check)
-    
-    Args:
-        predicted_sql: Predicted SQL query
-        ground_truth_sql: Ground truth SQL query
-        db_connection: SQLite database connection
-        
-    Returns:
-        Tuple of (is_correct, error_message)
-    """
-    try:
-        # Execute ground truth SQL
-        cursor = db_connection.cursor()
-        cursor.execute(ground_truth_sql)
-        ground_truth_result = cursor.fetchall()
-        
-        try:
-            # Execute predicted SQL
-            cursor.execute(predicted_sql)
-            predicted_result = cursor.fetchall()
-            
-            # Quick check: if results are identical
-            if predicted_result == ground_truth_result:
-                return True, ""
-            
-            # Check if same data but different order (handles column reordering)
-            if len(predicted_result) == len(ground_truth_result):
-                if len(predicted_result) == 0:
-                    return True, ""  # Both empty
-                
-                # Check if same number of columns
-                if predicted_result and len(predicted_result[0]) == len(ground_truth_result[0]):
-                    # Sort values within each row to handle column reordering
-                    pred_sorted_rows = set(tuple(sorted(row)) for row in predicted_result)
-                    gt_sorted_rows = set(tuple(sorted(row)) for row in ground_truth_result)
-                    
-                    if pred_sorted_rows == gt_sorted_rows:
-                        return True, ""
-            
-            # Execution succeeded but results don't match
-            # Return False with EMPTY error message to trigger semantic analysis
-            return False, ""
-                
-        except Exception as e:
-            # Execution failed - return with actual error message
-            return False, f"Execution error: {str(e)}"
-            
-    except Exception as e:
-        # Ground truth execution failed - return with error message  
-        return False, f"Ground truth execution error: {str(e)}"
-
-def check_execution_accuracy(predicted_sql: str, ground_truth_sql: str, 
-                                 db_connection: sqlite3.Connection) -> Tuple[bool, str]:
-        """
-        Check if predicted SQL executes correctly and produces the same output as ground truth.
-        
-        Args:
-            predicted_sql: Predicted SQL query
-            ground_truth_sql: Ground truth SQL query
-            db_connection: SQLite database connection
-            
-        Returns:
-            Tuple of (is_correct, error_message)
-        """
-        try:
-            # Execute ground truth SQL
-            cursor = db_connection.cursor()
-            cursor.execute(ground_truth_sql)
-            ground_truth_result = cursor.fetchall()
-            
-            # Convert to pandas DataFrame for easier comparison
-            ground_truth_df = pd.DataFrame(ground_truth_result)
-            
-            try:
-                # Execute predicted SQL
-                cursor.execute(predicted_sql)
-                predicted_result = cursor.fetchall()
-
-                # Simple check 
-                if set(predicted_result) == set(ground_truth_result):
-                    return True, ""
-                
-                # Convert to pandas DataFrame
-                predicted_df = pd.DataFrame(predicted_result)
-                
-                # Check if the results match
-                if ground_truth_df.shape == predicted_df.shape:
-                    # Sort both dataframes if they have values (not empty)
-                    if not ground_truth_df.empty and not predicted_df.empty:
-                        # First handle column ordering - reindex both DataFrames with sorted column names
-                        # This ensures column order doesn't affect comparison
-                        if len(ground_truth_df.columns) > 0:
-                            ground_truth_columns = sorted(ground_truth_df.columns)
-                            predicted_columns = sorted(predicted_df.columns)
-                            
-                            # If column sets are different, DataFrames are not equal
-                            if set(ground_truth_columns) != set(predicted_columns):
-                                return False, "Results have different column sets"
-                            
-                            # Reindex with sorted columns
-                            ground_truth_df = ground_truth_df[ground_truth_columns]
-                            predicted_df = predicted_df[predicted_columns]
-                        
-                        # Now sort by values in each row
-                        ground_truth_sorted = ground_truth_df.sort_values(by=list(ground_truth_df.columns)).reset_index(drop=True)
-                        predicted_sorted = predicted_df.sort_values(by=list(predicted_df.columns)).reset_index(drop=True)
-                        
-                        # Check equality
-                        return ground_truth_sorted.equals(predicted_sorted), ""
-                    else:
-                        # If both empty, that's a match
-                        return ground_truth_df.empty == predicted_df.empty, ""
-                else:
-                    return False, f"Results have different shapes: ground truth {ground_truth_df.shape} vs predicted {predicted_df.shape}"
-                
-            except Exception as e:
-                return False, f"Execution error: {str(e)}"
-                
-        except Exception as e:
-            return False, f"Ground truth execution error: {str(e)}"
 
 def normalize_sql(sql: str) -> str:
     """
