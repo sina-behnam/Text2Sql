@@ -11,15 +11,18 @@ But since we need to calculate VES which basically executing each query multiple
     
 """
 from typing import List, Tuple
-from src.workers.sql_worker import SQLWorker, ExecutionResult
-from src.evaluation.metrics.metric import Metric, MetricType
+from src.workers.sql_worker import SQLWorker
+from src.typing.execution import ExecutionResult
+from src.typing.query import DBQuery
+from src.typing.metrics import ExecutionLevelMetricType
+from src.evaluation.metrics.metric import Metric
 from src.evaluation.metrics.exec_accuracy import ExecAccuracy
 import json
 import numpy as np
 from pathlib import Path
     
 class VES(Metric):
-    name: MetricType = MetricType.VALID_EFFICIENCY_SCORE
+    name: ExecutionLevelMetricType = ExecutionLevelMetricType.VALID_EFFICIENCY_SCORE
     description: str = "Valid Efficiency Score (VES) metric for evaluating SQL query execution efficiency."
 
     def __init__(
@@ -96,7 +99,7 @@ class VES(Metric):
 
     def _target_execution(
         self,
-        target_queries: List[Tuple[str, str, str]],
+        target_queries: List[DBQuery],
         cache_target_path: str = None,
         cache_target: bool = True
     ) -> dict[str, ExecutionResult]:
@@ -116,7 +119,7 @@ class VES(Metric):
 
     def compute_ves(
         self,
-        prediction: List[Tuple[str, str, str]],
+        prediction: List[DBQuery],
     ) -> List[ExecutionResult]:
         """Compute the VES for a batch of SQL queries."""
 
@@ -142,16 +145,19 @@ class VES(Metric):
         
         return ves_scores
     
-    def compute_single(
+    def compute(
         self,
-        target: Tuple[str, str, str],
-        prediction: Tuple[str, str, str]
+        target: DBQuery,
+        prediction: DBQuery
     ) -> float:
         """Compute VES score for a single target and prediction query pair."""
         target_res = None
         if self.target_results is not None:
             print("Retrieving target result from cached results...")
-            target_res = self.target_results.get(str(prediction[1]), None)
+            target_res = self.target_results.get(prediction.query_id, None)
+
+        target = (target.db_path, target.query_id, target.query)
+        prediction = (prediction.db_path, prediction.query_id, prediction.query)        
 
         if target_res is None:
             target_res = self.sql_worker.execute_single(*target)
@@ -168,7 +174,7 @@ class VES(Metric):
         
         return ves_score
     
-    def compute(self, target: List[Tuple[str, str, str]], prediction: List[Tuple[str, str, str]]) -> List[float]:
+    def compute_many(self, target: List[DBQuery], prediction: List[DBQuery]) -> List[float]:
         """Compute VES scores given target and prediction queries."""
         if self.target_results is None:
             self.target_results = self._target_execution(target_queries=target)
@@ -177,9 +183,9 @@ class VES(Metric):
         ves_scores = [score for _, score in ves_results]
         return ves_scores
     
-    def compute_metric(self, metric_name: str, target: List[Tuple[str, str, str]], prediction: List[Tuple[str, str, str]]) -> List[float]:
+    def compute_metric(self, metric_name: str, target: DBQuery, prediction: DBQuery) -> float:
         """Compute a specific metric (VES) given target and prediction queries."""
-        if metric_name == MetricType.VALID_EFFICIENCY_SCORE:
+        if metric_name == ExecutionLevelMetricType.VALID_EFFICIENCY_SCORE:
             return self.compute(target, prediction)
         else:
             raise ValueError(f"Unsupported metric name: {metric_name}")

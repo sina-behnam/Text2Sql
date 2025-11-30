@@ -4,12 +4,15 @@ There are two possible input can happen when initializing ExecAccuracy metric.
 1. Providing the list of queries to be executed for both target and prediction. In this case, the metric will execute the queries using the provided SQLWorker.
 2. Providing the executed results to check the execution accuracy directly.
 """
-from src.workers.sql_worker import SQLWorker, ExecutionResult
-from src.evaluation.metrics.metric import Metric, MetricType
+from src.workers.sql_worker import SQLWorker
+from src.evaluation.metrics.metric import Metric
+from src.typing.metrics import ExecutionLevelMetricType
+from src.typing.query import DBQuery, TargetPredictedDBQuery
+from src.typing.execution import ExecutionResult
 from typing import List, Tuple
 
 class ExecAccuracy(Metric):
-    name: MetricType = MetricType.EXECUTION_ACCURACY
+    name: ExecutionLevelMetricType = ExecutionLevelMetricType.EXECUTION_ACCURACY
     description: str = "Execution Accuracy metric for evaluating SQL query execution correctness."
 
     def __init__(
@@ -30,9 +33,18 @@ class ExecAccuracy(Metric):
 
         super().__init__()
 
-    def query2results(
+    def query2result(
         self,
-        queries: List[Tuple[str, str, str]]
+        query: DBQuery
+    ) -> ExecutionResult:
+        """Execute a single query and return its execution result."""
+        query = (query.db_path, query.query_id, query.query)
+        results = self.sql_worker.execute_single(*query)
+        return results
+
+    def queries2results(
+        self,
+        queries: List[DBQuery]
     ) -> List[ExecutionResult]:
         """Execute the provided queries and return their execution results."""
         return self.sql_worker.execute_parallel(queries)
@@ -72,7 +84,7 @@ class ExecAccuracy(Metric):
         self,
         target: List[ExecutionResult],
         prediction: List[ExecutionResult]
-    ) -> float:
+    ) -> List[float]:
         """Compute execution accuracy given executed target and prediction results."""
         accuracies = []
         for t in target:
@@ -88,31 +100,35 @@ class ExecAccuracy(Metric):
             accuracy = self._evalute_(t, p)
             accuracies.append(accuracy)
 
-        if len(accuracies) == 0:
-            return 0.0
-        
-        return sum(accuracies) / len(accuracies)
+        return accuracies
     
     def compute(
         self,
-        target: List[Tuple[str, str, str]],
-        prediction: List[Tuple[str, str, str]]
+        target: DBQuery,
+        prediction: DBQuery
     ) -> float:
+        """Compute the execution accuracy between a single target and predicted query."""
+        target_result = self.query2result(target)
+        prediction_result = self.query2result(prediction)
+        accuracy = self._evalute_(target_result, prediction_result)
+        return accuracy
+    
+    def compute_many(
+        self,
+        target: List[DBQuery],
+        prediction: List[DBQuery]
+    ) ->  List[float]:
         """Compute the execution accuracy between target and predicted results."""
         print("Executing Target Queries...")
-        target_results = self.query2results(target)
+        target_results = self.queries2results(target)
         print("Executing Predicted Queries...")
-        prediction_results = self.query2results(prediction)
-        accuracy = self.compute_from_results(target_results, prediction_results)
-        return accuracy    
+        prediction_results = self.queries2results(prediction)
+        return self.compute_from_results(target_results, prediction_results)
     
     def compute_metric(
         self,
         name: str,
-        target: List[Tuple[str, str, str]],
-        prediction: List[Tuple[str, str, str]]
+        target: List[DBQuery],
+        prediction: List[DBQuery]
     ) -> float:
-        """Compute Execution Accuracy given target and prediction queries."""
-        if name != self.name.value:
-            raise ValueError(f"Metric name {name} does not match ExecAccuracy metric name {self.name.value}.")
-        return self.compute(target, prediction)
+        raise NotImplemented(f"Unsupported metric name: {name}")

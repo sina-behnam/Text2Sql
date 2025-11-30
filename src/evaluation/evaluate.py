@@ -8,26 +8,23 @@ import os
 
 from src.dataloader import DatasetInstance
 from src.evaluation.metrics.metric import MetricType, Metric
+from src.typing.query import DBQuery, TargetPredictedDBQuery
 from src.templates.base import BasePromptTemplate
 from src.utils.utils import get_db_path
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Iterable, Mapping, Any
+from enum import Enum
 
 from pymongo import MongoClient, errors, ASCENDING
 
-@dataclass 
-class DBQuery:
-    db_name: str
-    db_path: str
-    query_id: int
-    query: str
-
-@dataclass
-class TargetPredictedDBQuery:
-    target: DBQuery
-    predicted: DBQuery
-
 class BaseLoader:
+
+    def __init__(self):
+        pass
+
+    def format_data(self, *args, **kwargs) -> Any:
+        pass
+
     def load_data(self, *args, **kwargs) -> Any:
         raise NotImplementedError("load_data method must be implemented by subclasses.")
 
@@ -74,22 +71,22 @@ class MongoDBDataLoader(BaseLoader):
             print(f"Error connecting to MongoDB: {e}")
             raise e
         
-    def load_data(self, models : List[str], dataset : str , **configs) -> Dict[int, Any]:
+    def load_data(self, model : str, dataset : str , **configs) -> List:
         """
         Loading the data from MongoDB
-            """
+        """
 
         pipeline = [
             {
                 '$match': {
-                    'dataset': 'bird',
+                    'dataset': dataset,
                     'inference_results': {
                         '$elemMatch': {
                             'has_prediction': True,
-                            'model.model_name': {'$in': models},
-                            'model.model_config.temperature': {"$in": configs.get('temperature')},
-                            'model.model_config.frequency_penalty': {"$in": configs.get('frequency_penalty')},
-                            'model.model_config.presence_penalty': {"$in": configs.get('presence_penalty')},
+                            'model.model_name': model,
+                            'model.model_config.temperature': configs.get('temperature'),
+                            'model.model_config.frequency_penalty': configs.get('frequency_penalty'),
+                            'model.model_config.presence_penalty': configs.get('presence_penalty'),
                         }
                     }
                 }
@@ -102,10 +99,10 @@ class MongoDBDataLoader(BaseLoader):
                             'cond': {
                                 '$and': [
                                     {'$eq': ['$$this.has_prediction', True]},
-                                    {'$in': ['$$this.model.model_name', models]},
-                                    {'$in': ['$$this.model.model_config.temperature', configs.get('temperature')]},
-                                    {'$in': ['$$this.model.model_config.frequency_penalty', configs.get('frequency_penalty')]},
-                                    {'$in': ['$$this.model.model_config.presence_penalty', configs.get('presence_penalty')]}
+                                    {'$eq': ['$$this.model.model_name', model]},
+                                    {'$eq': ['$$this.model.model_config.temperature', configs.get('temperature')]},
+                                    {'$eq': ['$$this.model.model_config.frequency_penalty', configs.get('frequency_penalty')]},
+                                    {'$eq': ['$$this.model.model_config.presence_penalty', configs.get('presence_penalty')]}
                                 ]
                             }
                         }
@@ -116,10 +113,10 @@ class MongoDBDataLoader(BaseLoader):
                 '$project': {
                     'unique_id': 1,
                     'id': 1,
-                    'inference_results.model.model_name': 1,
-                    'inference_results.model.model_config.temperature': 1,
-                    'inference_results.model.model_config.frequency_penalty': 1,
-                    'inference_results.model.model_config.presence_penalty': 1,
+                    # 'inference_results.model.model_name': 1,
+                    # 'inference_results.model.model_config.temperature': 1,
+                    # 'inference_results.model.model_config.frequency_penalty': 1,
+                    # 'inference_results.model.model_config.presence_penalty': 1,
                     'inference_results.predicted_output.raw_response': 1
                 }
             }
@@ -130,7 +127,11 @@ class MongoDBDataLoader(BaseLoader):
         results = {}
         for d in docs:
             _id = int(d['id'])
-            results[_id] = d
+            try:
+                results[_id] = {'text' : d['inference_results'][0]['predicted_output']['raw_response']} # Assuming only one matching inference result
+            except (IndexError, KeyError):
+                print(f"Warning: No matching inference result for document ID {_id}. Skipping.")
+                continue
 
         return results
 
@@ -151,19 +152,25 @@ class JSONFileDataLoader(BaseLoader):
             data = json.load(f)
         return self._conversion_format(data)
     
-
 class Evaluate():
+
+    class QueryType(Enum):
+        TARGET = 'target'
+        PREDICTED = 'predicted'
+        BOTH = 'both'
 
     def __init__(self, 
                 metrics: Iterable[Metric],
                 loader : BaseLoader = None,
+                prompt_template: BasePromptTemplate = None,
                 *args, **kwargs):
 
         self.metrics = list(metrics)
         self.loader = loader
+        self.prompt_template = prompt_template
         
         # model, config params for mongo loader
-        self._models = kwargs.get('models', None) 
+        self._model = kwargs.get('model', None) 
         self._dataset = kwargs.get('dataset', None)
         self._temperature = kwargs.get('temperature', None)
         self._frequency_penalty = kwargs.get('frequency_penalty', None)
@@ -173,7 +180,7 @@ class Evaluate():
     def data(self) -> Any:
         if self.loader is None:
             raise ValueError("Loader is not defined.")
-        return self.loader.load_data(self._models, 
+        return self.loader.load_data(self._model, 
                                     dataset=self._dataset,
                                     temperature=self._temperature,
                                     frequency_penalty=self._frequency_penalty,
@@ -202,7 +209,7 @@ class Evaluate():
         for instance, instance_path in instances:
 
             _id = instance.id
-            db_path = get_db_path(instance_path)
+            db_path = get_db_path(instance, instance_path)
             db_name = instance.database['name']
             target_sql = instance.sql
 
@@ -231,9 +238,9 @@ class Evaluate():
         return _target_predicted_db_queries
     
     @staticmethod
-    def _target_predicted_dict_to_list(tp_dict: Dict[int, TargetPredictedDBQuery], dist : str = 'target') -> List[DBQuery]:
-        if dist not in ['target', 'predicted', 'both']:
-            raise ValueError("dist must be either 'target' or 'predicted'")
+    def _target_predicted_dict_to_list(tp_dict: Dict[int, TargetPredictedDBQuery], dist : str | QueryType = 'target') -> List[DBQuery]:
+        if dist not in Evaluate.QueryType._value2member_map_:
+            raise ValueError(f"Invalid dist value: {dist}. Must be one of {[e.value for e in Evaluate.QueryType]}")
         
         tp_list = []
         for _id, tp in tp_dict.items():
@@ -246,16 +253,15 @@ class Evaluate():
         return tp_list
 
     def evaluate(self,
-                instances: List[Tuple[DatasetInstance, str]],
-                extracted_sqls: Dict[int, str]) -> Mapping[str, float | int | List[float | int]]:
+                instances: List[Tuple[DatasetInstance, str]]) -> Mapping[str, float | int | List[float | int]]:
         """Evaluate the extracted SQL queries against the target queries using the specified metrics.
         Args:
             instances (List[Tuple[DatasetInstance, str]]): List of dataset instances along with their file paths.
-            extracted_sqls (Dict[int, str]): Dictionary mapping instance IDs to their extracted SQL queries.
         Returns:
             Mapping[str, float | int | List[float | int]]: A dictionary containing the computed metric values.
         """
-
+        extracted_sqls = self._sql_extraction(self.data,self.prompt_template)
+        
         #get target-predicted dict
         tp_dict = self._instance2_dbquery(instances, extracted_sqls)
     
@@ -265,7 +271,7 @@ class Evaluate():
 
         results = {}
         for metric in self.metrics:
-            results[metric.get_name().value] = metric.compute(
+            results[metric.get_name()] = metric.compute(
                 target=target_queries,
                 prediction=predicted_queries
             )

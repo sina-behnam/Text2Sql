@@ -1,6 +1,7 @@
 import numpy as np
 from collections import Counter
 from typing import Dict
+from src.typing.metrics import TupleLevelMetricType
 
 def _normalize(data: float):
     data = [-1, data, 1]
@@ -42,6 +43,8 @@ def _sort_with_different_types(arr):
 
 
 class TupleLevelMetrics:
+    name: TupleLevelMetricType = TupleLevelMetricType
+    description: str = "Tuple Level Metrics for evaluating data tuple correctness."
 
     @staticmethod
     def tuple_cardinality(target: list[list], prediction: list[list]) -> float | int:
@@ -127,11 +130,11 @@ class TupleLevelMetrics:
             target (list[list]): The ground truth data as a list of tuples.
             prediction (list[list]): The predicted data as a list of tuples.
         """
-        if metric_name == "tuple_cardinality":
+        if metric_name == TupleLevelMetricType.TUPLE_CARDINALITY:
             return self.tuple_cardinality(target, prediction)
-        elif metric_name == "tuple_order":
+        elif metric_name == TupleLevelMetricType.TUPLE_ORDER:
             return self.tuple_order(target, prediction)
-        elif metric_name == "tuple_constraints":
+        elif metric_name == TupleLevelMetricType.TUPLE_CONSTRAINTS:
             return self.tuple_constraint(target, prediction)
         else:
             raise ValueError(f"Unknown metric name: {metric_name}. Valid options are 'tuple_cardinality', 'tuple_order', 'tuple_constraints'.")

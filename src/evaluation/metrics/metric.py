@@ -10,20 +10,7 @@ The categories of metrics are as follows:
 from typing import Any, Dict
 from abc import ABC, abstractmethod
 from enum import Enum
-
-class MetricType(str, Enum):
-    # ----- execution level
-    EXECUTION_ACCURACY = "execution_accuracy"
-    EXECUTION_TIME = "execution_time"
-    VALID_EFFICIENCY_SCORE = "valid_efficiency_score"
-    EXACT_MATCH = "exact_match"
-    # ----- cell level
-    CELL_PRECISION = "cell_precision"
-    CELL_RECALL = "cell_recall"
-    # ----- tuple level
-    TUPLE_CARDINALITY = "tuple_cardinality"
-    TUPLE_ORDER = "tuple_order"
-    TUPLE_CONSTRAINTS = "tuple_constraints"
+from src.typing.metrics import MetricType
     
 class Metric(ABC):
     name: MetricType = None
