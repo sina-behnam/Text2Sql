@@ -6,7 +6,9 @@ from sqlalchemy import create_engine, text, pool
 from tqdm import tqdm
 import sqlalchemy
 import numpy as np
-from src.evaluation.metrics.workers.sql_logger import SQLLogger
+from src.workers.sql_logger import SQLLogger
+from src.typing.execution import ExecutionResult
+from src.typing.query import DBQuery
 
 execution_logger = SQLLogger.get_instance().get_execution_logger()
 
@@ -17,14 +19,6 @@ def _remove_outliers(array: list[float]) -> list[float]:
     mean, std = np.mean(array), np.std(array)
     lower, upper = mean - 3 * std, mean + 3 * std
     return [x for x in array if lower <= x <= upper]
-
-@dataclass
-class ExecutionResult:
-    query_id: str
-    results: List[Tuple]
-    exec_time_ms: float
-    success: bool
-    error: str = ""
 
 def _execute_single_query_worker(
     db_url: str,
@@ -150,11 +144,11 @@ class SQLWorker:
             self.runs_per_query, self.timeout, self.max_try_timeout
         )
 
-    def execute_batch(self, db_url: str, queries: List[Tuple[str, str]]) -> List[ExecutionResult]:
+    def execute_batch(self, db_url: str, queries: List[DBQuery]) -> List[ExecutionResult]:
         """Execute multiple queries sequentially on one database."""
-        return [self.execute_single(db_url, qid, sql) for qid, sql in queries]
+        return [self.execute_single(db_url, query.query_id, query.query) for query in queries]
     
-    def execute_db_parallel(self, db_url: str, queries: List[Tuple[str, str]]) -> List[ExecutionResult]:
+    def execute_db_parallel(self, db_url: str, queries: List[DBQuery]) -> List[ExecutionResult]:
         """
         Execute multiple queries in parallel on one database.
         
@@ -169,10 +163,10 @@ class SQLWorker:
             futures = {
                 executor.submit(
                     _execute_single_query_worker,
-                    db_url, query_id, sql,
+                    db_url, query.query_id, query.query,
                     self.runs_per_query, self.timeout, self.max_try_timeout
-                ): query_id
-                for query_id, sql in queries
+                ): query.query_id
+                for query in queries
             }
 
             for future in tqdm(as_completed(futures), total=len(futures), desc="Executing"):
@@ -180,7 +174,7 @@ class SQLWorker:
 
         return results
 
-    def execute_parallel(self, queries: List[Tuple[str, str, str]]) -> List[ExecutionResult]:
+    def execute_parallel(self, queries: List[DBQuery]) -> List[ExecutionResult]:
         """
         Execute queries in parallel at QUERY level.
         
@@ -196,10 +190,10 @@ class SQLWorker:
             futures = {
                 executor.submit(
                     _execute_single_query_worker,
-                    db_url, query_id, sql,
+                    query.db_path, query.query_id, query.query,
                     self.runs_per_query, self.timeout, self.max_try_timeout
-                ): query_id
-                for db_url, query_id, sql in queries
+                ): query.query_id
+                for query in queries
             }
 
             for future in tqdm(as_completed(futures), total=len(futures), desc="Executing"):
