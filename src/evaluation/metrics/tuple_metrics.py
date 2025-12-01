@@ -1,7 +1,9 @@
 import numpy as np
 from collections import Counter
-from typing import Dict
+from typing import Dict, List, Tuple
+from src.typing.query import DBQuery
 from src.typing.metrics import TupleLevelMetricType
+from src.typing.result import TupleResult
 
 def _normalize(data: float):
     data = [-1, data, 1]
@@ -105,21 +107,31 @@ class TupleLevelMetrics:
             rho = 1 - 6 * sum_diff_rank_squared / (n * (n ** 2 - 1))
         return _normalize(round(rho, 3))
     
-    def compute(self, target: list[list], prediction: list[list]) -> Dict[str, float | int]:
-        """Compute all tuple-level metrics given target and prediction.
-
-        Args:
-            target (list[list]): The ground truth data as a list of tuples.
-            prediction (list[list]): The predicted data as a list of tuples.
-        Returns:
-            Dict[str, float | int]: A dictionary containing the computed metric values for cardinality,
-                                    order, and constraints.                             
-        """
-        return {
-            "tuple_cardinality": self.tuple_cardinality(target, prediction),
-            "tuple_order": self.tuple_order(target, prediction),
-            "tuple_constraints": self.tuple_constraint(target, prediction)
-        }
+    def find_by_id(self, target: List[DBQuery], id: str):
+        for instance in target:
+            if instance.query_id == int(id):
+                return instance
+        return None
+    
+    def compute(self, target: DBQuery, prediction: DBQuery) -> TupleResult:
+        tuple_cardinality = self.tuple_cardinality(target.query, prediction.query)
+        tuple_order = self.tuple_order(target.query, prediction.query)
+        tuple_constraint = self.tuple_constraint(target.query, prediction.query)
+        return TupleResult(
+            query_id=str(target.query_id),
+            tuple_cardinality=tuple_cardinality,
+            tuple_order=tuple_order,
+            tuple_constraint=tuple_constraint
+        )
+        
+    def compute_many(self, target: List[DBQuery], prediction: List[DBQuery]) -> List[TupleResult]:
+        results = []
+        for t in target:
+            p = self.find_by_id(prediction, str(t.query_id))
+            if p is not None:
+                result = self.compute(t, p)
+                results.append(result)
+        return results
 
     def compute_metric(self, metric_name: str, target: list[list], prediction: list[list]) -> float | int:
         """Compute a specific tuple-level metric given target and prediction.

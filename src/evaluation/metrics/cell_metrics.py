@@ -1,6 +1,8 @@
 from itertools import chain
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from src.typing.metrics import CellLevelMetricType
+from src.typing.query import DBQuery
+from src.typing.result import CellResult
 from src.evaluation.metrics.metric import Metric
 import numpy as np
 
@@ -38,23 +40,38 @@ class CellLevelMetrics(Metric):
         sum_cell_match = len(intersected_cells)
         return round(sum_cell_match / len(target), 3)
     
-    def compute(self, target: any, prediction: any) -> Dict[str, float | int]:
-        precision = self.cell_precision(target, prediction)
-        recall = self.cell_recall(target, prediction)
-        return {
-            "cell_precision": precision,
-            "cell_recall": recall
-        }
+    def find_by_id(self, target: List[DBQuery], id: str):
+        for instance in target:
+            if instance.query_id == int(id):
+                return instance
+        return None
+        
     
-    def compute_many(self, target: any, prediction: any) -> List[Dict[str, float | int]]:
-        ...
+    def compute(self, target: DBQuery, prediction: DBQuery) -> CellResult:
+        precision = self.cell_precision(target.query, prediction.query)
+        recall = self.cell_recall(target.query, prediction.query)
+        return CellResult(
+            query_id=str(target.query_id),
+            cell_precision=precision,
+            cell_recall=recall
+        )
     
-    def compute_metric(self, metric_name: str, target: any, prediction: any) -> float | int:
+    def compute_many(self, target: List[DBQuery], prediction: List[DBQuery]) -> List[CellResult]:
+        results = []
+        for t in target:
+            p = self.find_by_id(prediction, str(t.query_id))
+            if p is not None:
+                result = self.compute(t, p)
+                results.append(result)
+        return results
+    
+    
+    def compute_metric(self, metric_name: str, target: DBQuery, prediction: DBQuery) -> float | int:
         """Compute a specific metric given target and prediction."""
         if metric_name == CellLevelMetricType.CELL_PRECISION:
-            return self.cell_precision(target, prediction)
+            return self.cell_precision(target.query, prediction.query)
         elif metric_name == CellLevelMetricType.CELL_RECALL:
-            return self.cell_recall(target, prediction)
+            return self.cell_recall(target.query, prediction.query)
         else:
             raise ValueError(f"Unsupported metric name: {metric_name}. Valid options are 'cell_precision' and 'cell_recall'.")
         
