@@ -7,7 +7,7 @@ from tqdm import tqdm
 import sqlalchemy
 import numpy as np
 from src.workers.sql_logger import SQLLogger
-from src.typing.execution import ExecutionResult
+from src.typing.result import ExecutionResult
 from src.typing.query import DBQuery
 
 execution_logger = SQLLogger.get_instance().get_execution_logger()
