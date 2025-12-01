@@ -1,5 +1,5 @@
 from typing import Optional, Tuple, List, Dict
-from src.utils.templates.base import BasePromptTemplate
+from src.templates.base import BasePromptTemplate
 import re
 import json
 

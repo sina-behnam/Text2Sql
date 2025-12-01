@@ -1,5 +1,5 @@
 from typing import Optional, Tuple
-from src.utils.templates.base import BasePromptTemplate
+from src.templates.base import BasePromptTemplate
 import re
 
 class DefaultPromptTemplate(BasePromptTemplate):
