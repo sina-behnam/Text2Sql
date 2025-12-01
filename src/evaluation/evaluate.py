@@ -3,7 +3,7 @@ import sys
 sys.path.append('../../')
 sys.path.append('../../src/')
 
-from loaders.dataloader import DatasetInstance
+from src.loaders.dataloader import DatasetInstance
 from src.loaders.base import BaseLoader
 from src.evaluation.metrics.metric import MetricType, Metric
 from src.typing.query import DBQuery, TargetPredictedDBQuery
@@ -11,7 +11,10 @@ from src.templates.base import BasePromptTemplate
 from src.utils.utils import get_db_path
 from typing import List, Tuple, Dict, Iterable, Mapping, Any
 from enum import Enum
+import signal
 
+def timeout_handler(signum, frame):
+    raise TimeoutError("SQL extraction timed out.")
     
 class Evaluate():
 
@@ -37,22 +40,32 @@ class Evaluate():
         self._frequency_penalty = kwargs.get('frequency_penalty', None)
         self._presence_penalty = kwargs.get('presence_penalty', None)
         
-    @property
-    def data(self) -> Any:
-        if self.loader is None:
-            raise ValueError("Loader is not defined.")
-        return self.loader.load_data(self._model, 
-                                    dataset=self._dataset,
-                                    temperature=self._temperature,
-                                    frequency_penalty=self._frequency_penalty,
-                                    presence_penalty=self._presence_penalty)
+    # @property
+    # def data(self) -> Any:
+    #     if self.loader is None:
+    #         raise ValueError("Loader is not defined.")
+    #     return self.loader.load_data(self._model, 
+    #                                 dataset=self._dataset,
+    #                                 temperature=self._temperature,
+    #                                 frequency_penalty=self._frequency_penalty,
+    #                                 presence_penalty=self._presence_penalty)
 
     @staticmethod
     def _sql_extraction(data : dict, prompt_template : BasePromptTemplate) -> Dict[int, str]:
         results = {}
         for key in data.keys():
             k = int(key)
-            sql_query = prompt_template.extract_sql(data[key]['text'])
+            # adding signal timeout for extraction
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(10)  # Set the timeout duration (e.g., 5 seconds)
+            try:
+                sql_query = prompt_template.extract_sql(data[key]['text'])
+            except TimeoutError:
+                print(f"Timeout occurred while extracting SQL for key: {key}")
+                continue
+            finally:
+                signal.alarm(0)  # Disable the alarm
+
             results[k] = sql_query
         return results
     
@@ -121,24 +134,30 @@ class Evaluate():
         Returns:
             Mapping[str, float | int | List[float | int]]: A dictionary containing the computed metric values.
         """
-        extracted_sqls = self._sql_extraction(self.data,self.prompt_template)
+        # load data
+        data = self.loader.load_data(self._model, 
+                                     dataset=self._dataset,
+                                     temperature=self._temperature,
+                                     frequency_penalty=self._frequency_penalty,
+                                     presence_penalty=self._presence_penalty)
         
-        #get target-predicted dict
-        tp_dict = self._instance2_dbquery(instances, extracted_sqls)
-    
-        #get 
-        target_queries = self._target_predicted_dict_to_list(tp_dict, dist='target')
-        predicted_queries = self._target_predicted_dict_to_list(tp_dict, dist='predicted')
+        # extract sql queries
+        extracted_queries = self._sql_extraction(data, self.prompt_template)
 
+        # convert to TargetPredictedDBQuery
+        tp_db_queries = self._instance2_dbquery(instances, extracted_queries)
         results = {}
         for metric in self.metrics:
-            results[metric.get_name()] = metric.compute(
-                target=target_queries,
-                prediction=predicted_queries
+            tp_list = self._target_predicted_dict_to_list(tp_db_queries, dist=Metric.get_name(metric))
+            metric_values = metric.compute_many(
+                target=self._target_predicted_dict_to_list(tp_db_queries, dist='target'),
+                prediction=tp_list
             )
-        
+            results[Metric.get_name(metric).value] = metric_values
+
         return results
 
+        
     
         
 
