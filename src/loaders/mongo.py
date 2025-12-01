@@ -47,22 +47,36 @@ class MongoDBDataLoader(BaseLoader):
     
     @staticmethod
     def pipeline(model: str, dataset: str , **configs) -> List[Dict]:
-        fetch_pipeline = [
-            {
+        match_stage = {
                 '$match': {
                     'dataset': dataset,
                     'inference_results': {
                         '$elemMatch': {
                             'has_prediction': True,
                             'model.model_name': model,
-                            'model.model_config.temperature': configs.get('temperature'),
-                            'model.model_config.frequency_penalty': configs.get('frequency_penalty'),
-                            'model.model_config.presence_penalty': configs.get('presence_penalty'),
+                            '$or': [
+                                {
+                                    # Match by specific config parameters
+                                    '$and': [
+                                        {'model.model_config.temperature': {'$exists': True}},
+                                        {'model.model_config.frequency_penalty': {'$exists': True}},
+                                        {'model.model_config.presence_penalty': {'$exists': True}},
+                                        {'model.model_config.temperature': configs.get('temperature')},
+                                        {'model.model_config.frequency_penalty': configs.get('frequency_penalty')},
+                                        {'model.model_config.presence_penalty': configs.get('presence_penalty')}
+                                    ]
+                                },
+                                {
+                                    # Match by profile
+                                    'model.model_config.profile': configs.get('profile')
+                                }
+                            ]
                         }
                     }
                 }
-            },
-            {
+            }
+        
+        addfields_stage = {
                 '$addFields': {
                     'inference_results': {
                         '$filter': {
@@ -71,16 +85,30 @@ class MongoDBDataLoader(BaseLoader):
                                 '$and': [
                                     {'$eq': ['$$this.has_prediction', True]},
                                     {'$eq': ['$$this.model.model_name', model]},
-                                    {'$eq': ['$$this.model.model_config.temperature', configs.get('temperature')]},
-                                    {'$eq': ['$$this.model.model_config.frequency_penalty', configs.get('frequency_penalty')]},
-                                    {'$eq': ['$$this.model.model_config.presence_penalty', configs.get('presence_penalty')]}
+                                    {
+                                        '$or': [
+                                            {
+                                                # Filter by config parameters
+                                                '$and': [
+                                                    {'$eq': [{'$ifNull': ['$$this.model.model_config.temperature', None]}, {'$ifNull': [configs.get('temperature'), None]}]},
+                                                    {'$eq': [{'$ifNull': ['$$this.model.model_config.frequency_penalty', None]}, {'$ifNull': [configs.get('frequency_penalty'), None]}]},
+                                                    {'$eq': [{'$ifNull': ['$$this.model.model_config.presence_penalty', None]}, {'$ifNull': [configs.get('presence_penalty'), None]}]}
+                                                ]
+                                            },
+                                            {
+                                                # Filter by profile
+                                                '$eq': ['$$this.model.model_config.profile', configs.get('profile')]
+                                            }
+                                        ]
+                                    }
                                 ]
                             }
                         }
                     }
                 }
-            },
-            {
+            }
+
+        project_stage = {
                 '$project': {
                     'unique_id': 1,
                     'id': 1,
@@ -88,17 +116,17 @@ class MongoDBDataLoader(BaseLoader):
                     'inference_results.model.model_config.temperature': 1,
                     'inference_results.model.model_config.frequency_penalty': 1,
                     'inference_results.model.model_config.presence_penalty': 1,
+                    'inference_results.model.model_config.profile': 1,
                     'inference_results.predicted_output.raw_response': 1
                 }
             }
-        ]
-        return fetch_pipeline
+        return [match_stage, addfields_stage, project_stage]
         
     def load_data(self, model : str, dataset : str , **configs) -> List:
         """
         Loading the data from MongoDB
         """
-        docs = self.collection.aggregate(MongoDBDataLoader.pipeline(model, dataset, **configs))
+        docs = self.collection.aggregate(MongoDBDataLoader.pipeline(model, dataset, profile='default' ,**configs))
 
         results = {}
         for d in docs:
