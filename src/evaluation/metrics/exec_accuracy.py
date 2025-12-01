@@ -8,7 +8,7 @@ from src.workers.sql_worker import SQLWorker
 from src.evaluation.metrics.metric import Metric
 from src.typing.metrics import ExecutionLevelMetricType
 from src.typing.query import DBQuery, TargetPredictedDBQuery
-from src.typing.execution import ExecutionResult
+from src.typing.result import ExecutionResult
 from typing import List, Tuple
 
 class ExecAccuracy(Metric):
@@ -49,8 +49,8 @@ class ExecAccuracy(Metric):
         """Execute the provided queries and return their execution results."""
         return self.sql_worker.execute_parallel(queries)
     
-    @staticmethod
-    def _find_by_id_(
+    def find_by_id(
+        self,
         lst: List[ExecutionResult],
         id: str
     ) -> ExecutionResult | None:
@@ -90,11 +90,15 @@ class ExecAccuracy(Metric):
         for t in target:
             
             if t.success is False:
+                print(f"Warning: Target query with ID {t.query_id} failed during execution. Skipping accuracy computation for this query.")
+                accuracies.append(0.0)
                 continue
 
-            p = self._find_by_id_(prediction, t.query_id)
+            p = self.find_by_id(prediction, t.query_id)
 
             if p is None:
+                print(f"Warning: No prediction result found for query ID {t.query_id}. Skipping accuracy computation for this query.")
+                accuracies.append(0.0)
                 continue
 
             accuracy = self._evalute_(t, p)

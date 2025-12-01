@@ -12,7 +12,7 @@ But since we need to calculate VES which basically executing each query multiple
 """
 from typing import List, Tuple
 from src.workers.sql_worker import SQLWorker
-from src.typing.execution import ExecutionResult
+from src.typing.result import ExecutionResult
 from src.typing.query import DBQuery
 from src.typing.metrics import ExecutionLevelMetricType
 from src.evaluation.metrics.metric import Metric
@@ -51,10 +51,10 @@ class VES(Metric):
         super().__init__()
 
     @staticmethod
-    def _save_to_cache_file(cache_file_path: str, results: List[ExecutionResult]) -> None:
+    def _save_to_cache_file(cache_file_path: str, results: dict[int, ExecutionResult]) -> None:
         cache_dict = {}
-        for res in results:
-            cache_dict[str(res.query_id)] = {
+        for res in results.values():
+            cache_dict[int(res.query_id)] = {
                 'results': res.results,
                 'exec_time_ms': res.exec_time_ms,
                 'success': res.success,
@@ -96,6 +96,9 @@ class VES(Metric):
         for res in results:
             result_dict[str(res.query_id)] = res
         return result_dict
+    
+    def find_by_id(self, target, id):
+        return super().find_by_id(target, id)
 
     def _target_execution(
         self,
@@ -111,7 +114,8 @@ class VES(Metric):
         target_results = self._list_to_dict(self.sql_worker.execute_parallel(
             target_queries
         ))
-
+        print(f"Executed {len(target_results)} target queries.")
+        
         if cache_target and cache_target_path is not None:
             self._save_to_cache_file(cache_target_path, target_results)
         
