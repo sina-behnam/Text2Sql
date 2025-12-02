@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Tuple
 import numpy as np
+from typing import Optional
 
 @dataclass
 class ExecutionResult:
@@ -23,6 +24,19 @@ class TupleResult:
     tuple_cardinality: float
     tuple_order: float
     tuple_constraint: float
+
+@dataclass
+class ExecutionMetricResult:
+    """Unified result for execution-based metrics (ExecAccuracy and VES)."""
+    query_id: str
+    execution_accuracy: float
+    ves_score: Optional[float] = None  # Only filled by VES
+    
+    # Additional metadata
+    target_exec_time_ms: Optional[float] = None
+    prediction_exec_time_ms: Optional[float] = None
+    target_success: Optional[bool] = None
+    prediction_success: Optional[bool] = None
 
 
 def to_numpy(results : List[CellResult | TupleResult], metric_name: str) -> np.ndarray:
