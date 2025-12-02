@@ -38,7 +38,7 @@ def _load_default_mongo_uri() -> str:
         return f.read().strip()
 
 class MongoDBConfig(BaseModel):
-    database_name: str = Field('model_inference_results')
+    db_name: str = Field('model_inference_results')
     collection_name: str = Field('inference_results')
     db_uri: str = Field(default_factory=_load_default_mongo_uri)
 
