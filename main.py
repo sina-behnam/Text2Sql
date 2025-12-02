@@ -15,7 +15,7 @@ from typing import Optional
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.dataloader import DatasetLoader
+from loaders.dataloader import DatasetLoader
 from pipeline.modular_pipeline import Text2SQLPipeline
 from pipeline.steps import (
     GenerateStep, ExtractStep, EvaluateStep, MetricsStep, SaveStep, LoadStep
