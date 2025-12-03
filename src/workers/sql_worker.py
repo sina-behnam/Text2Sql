@@ -176,15 +176,9 @@ class SQLWorker:
 
     def execute_parallel(self, queries: List[DBQuery]) -> List[ExecutionResult]:
         """
-        Execute queries in parallel at QUERY level.
-        
-        Args:
-            queries: List of (db_url, query_id, sql) tuples
-        
-        Returns:
-            List of ExecutionResult
+        Execute queries in parallel, preserving input order (handles duplicate query_ids).
         """
-        results = []
+        results = [None] * len(queries)
 
         with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
             futures = {
@@ -192,11 +186,34 @@ class SQLWorker:
                     _execute_single_query_worker,
                     query.db_path, query.query_id, query.query,
                     self.runs_per_query, self.timeout, self.max_try_timeout
-                ): query.query_id
-                for query in queries
+                ): idx
+                for idx, query in enumerate(queries)
             }
 
             for future in tqdm(as_completed(futures), total=len(futures), desc="Executing"):
-                results.append(future.result())
+                idx = futures[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    # Process-level failure - create failed result
+                    query = queries[idx]
+                    results[idx] = ExecutionResult(
+                        query_id=str(query.query_id),
+                        results=[],
+                        exec_time_ms=0,
+                        success=False,
+                        error=f"Process error: {str(e)}"
+                    )
 
+        # Safety check: replace any remaining None with failed result
+        for idx, res in enumerate(results):
+            if res is None:
+                query = queries[idx]
+                results[idx] = ExecutionResult(
+                    query_id=str(query.query_id),
+                    results=[],
+                    exec_time_ms=0,
+                    success=False,
+                    error="Unknown execution failure"
+                )
         return results
