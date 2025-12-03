@@ -77,6 +77,24 @@ class Evaluate():
         return None,None
     
     @staticmethod
+    def get_target_queries(instances : List[Tuple[DatasetInstance, str]]) -> List[DBQuery]:
+        target_queries = []
+        for instance, instance_path in instances:
+            _id = instance.id
+            db_path = get_db_path(instance, instance_path)
+            db_name = instance.database['name']
+            target_sql = instance.sql
+
+            target_db_query = DBQuery(
+                db_name=db_name,
+                db_path=db_path,
+                query_id=_id,
+                query=target_sql
+            )
+            target_queries.append(target_db_query)
+        return target_queries
+    
+    @staticmethod
     def _instance2_dbquery(instances: List[Tuple[DatasetInstance, str]], queries: Dict) -> Dict[int, TargetPredictedDBQuery]:
 
         _target_predicted_db_queries = {}
@@ -89,6 +107,7 @@ class Evaluate():
 
             predicted_sql = queries.get(_id, None)
             if predicted_sql is None:
+                print(f"There is no predicted SQL for id {_id}")
                 continue
 
             target_db_query = DBQuery(
@@ -97,6 +116,7 @@ class Evaluate():
                 query_id=_id,
                 query=target_sql
             )
+            
             predicted_db_query = DBQuery(
                 db_name=db_name,
                 db_path=db_path,

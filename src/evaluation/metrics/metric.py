@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from src.typing.metrics import MetricType
 from src.typing.query import DBQuery
-from typing import List
+from typing import List, Tuple, Any, Optional
     
 class Metric(ABC):
     name: MetricType = None
@@ -22,7 +22,7 @@ class Metric(ABC):
     def get_name(cls) -> MetricType:
         return cls.name
     
-    @abstractmethod
+    @classmethod
     def find_by_id(self, target: List[DBQuery], id: str) -> Any:
         """Find an instance by its ID.
 
@@ -31,7 +31,10 @@ class Metric(ABC):
         Returns:
             Any: The found instance or None if not found.
         """
-        pass
+        for instance in target:
+            if instance.query_id == int(id):
+                return instance
+        return None
 
     @abstractmethod
     def compute(self, target : DBQuery, prediction: DBQuery) -> float | int:
@@ -46,14 +49,14 @@ class Metric(ABC):
         pass
 
     @abstractmethod
-    def compute_many(self, target: list[DBQuery], prediction: list[DBQuery]) -> list[float | int]:
+    def compute_many(self, target: list[DBQuery], prediction: list[DBQuery]) -> List[float | int] | Tuple[List[float | int], List[str]]:
         """Compute the metric values for multiple target-prediction pairs.
 
         Args:
             target (List[Any]): List of ground truth data.
             prediction (List[Any]): List of predicted data.
         Returns:
-            List[Dict[str, float | int]]: List of computed metric values.
+            List[float | int] | Tuple[List[float | int], List[str]]: The computed metric values, optionally with IDs.
         """
         pass
 
