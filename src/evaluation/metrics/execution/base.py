@@ -2,7 +2,7 @@ from abc import abstractmethod
 from typing import List, Tuple, Dict, Optional
 from src.workers.sql_worker import SQLWorker
 from src.evaluation.metrics.metric import Metric
-from src.typing.query import DBQuery
+from src.typing.query import DBQuery, TargetPredictedDBQuery
 from src.typing.result import ExecutionResult
 import json
 from pathlib import Path
@@ -57,7 +57,7 @@ class ExecutionBasedMetric(Metric):
         # Convert to dict
         return {str(r.query_id): r for r in results_list}
 
-    def _execute_predictions(self, prediction_queries: List[DBQuery]) -> List[ExecutionResult]:
+    def _execute_predictions(self, prediction_queries: List[DBQuery]) -> Dict[str, ExecutionResult]:
         """Execute prediction queries."""
         log_with_emoji(
             metrics_logger,
@@ -65,9 +65,9 @@ class ExecutionBasedMetric(Metric):
             f"Executing {len(prediction_queries)} prediction queries...",
             "rocket"
         )
-        
+
         results = self.sql_worker.execute_parallel(prediction_queries)
-        
+
         successful = sum(1 for r in results if r.success)
         log_with_emoji(
             metrics_logger,
@@ -75,27 +75,28 @@ class ExecutionBasedMetric(Metric):
             f"Prediction execution complete: {successful}/{len(results)} successful",
             "bar_chart"
         )
-        
-        return results
+
+        # Convert to dict for consistency with targets
+        return {str(r.query_id): r for r in results}
 
     def _compute_score(self, target: ExecutionResult, prediction: ExecutionResult) -> float:
         """Compute metric score for a single target-prediction pair.
-        
+
         Must be implemented by subclasses.
         """
         raise NotImplementedError("_compute_score must be implemented by subclasses.")
 
-    def compute_many(
+    def _score_results(
         self,
         target_results: Dict[str, ExecutionResult],
-        prediction_results: List[ExecutionResult]
+        prediction_results: Dict[str, ExecutionResult]
     ) -> Tuple[List[float], List[str]]:
         """
-        Compute metric for multiple queries.
+        Compute metric scores from execution results (internal scoring logic).
 
         Args:
             target_results: Dict mapping query_id to ExecutionResult (already executed)
-            prediction_results: List of ExecutionResult (already executed)
+            prediction_results: Dict mapping query_id to ExecutionResult (already executed)
 
         Returns:
             Tuple of (scores, skipped_ids)
@@ -105,8 +106,7 @@ class ExecutionBasedMetric(Metric):
         scores = []
         skipped = []
 
-        for pred_res in prediction_results:
-            query_id = str(pred_res.query_id)
+        for query_id, pred_res in prediction_results.items():
             target_res = target_results.get(query_id)
 
             # Skip if target doesn't exist or failed
@@ -146,6 +146,32 @@ class ExecutionBasedMetric(Metric):
             metrics_logger.info(f"Skipped query IDs: {', '.join(skipped[:10])}{'...' if len(skipped) > 10 else ''}")
 
         return scores, skipped
+
+    def compute_many(
+        self,
+        target_queries: List[DBQuery],
+        predicted_queries: List[DBQuery]
+    ) -> Tuple[List[float], List[str]]:
+        """
+        Compute metric for multiple query pairs (public API).
+
+        This method handles execution and delegates to _score_results for scoring.
+
+        Args:
+            target_queries: List of target/ground truth queries
+            predicted_queries: List of predicted queries
+
+        Returns:
+            Tuple of (scores, skipped_ids)
+            - scores: List of metric values
+            - skipped_ids: List of query IDs that were skipped
+        """
+        # Execute targets and predictions
+        target_results = self._execute_targets(target_queries)
+        prediction_results = self._execute_predictions(predicted_queries)
+
+        # Delegate to scoring logic
+        return self._score_results(target_results, prediction_results)
 
     def compute(self, target: DBQuery, prediction: DBQuery) -> float:
         """Compute metric for a single query pair."""
@@ -207,7 +233,8 @@ class CachedExecutionMetricWrapper:
             ...
     """
 
-    _shared_runtime_cache = {}  # Shared runtime cache for all instances
+    _shared_target_cache = {}  # Shared cache for all instances both runtime and file-based
+    _shared_runtime_prediction_cache = {}  # Shared runtime cache for predictions only (but not file-based)
 
     def __init__(self, metric_or_class, cache_file_path: str = None):
         """
@@ -236,7 +263,7 @@ class CachedExecutionMetricWrapper:
             cached_data = self._load_file_cache(cache_file_path)
             if cached_data:
                 # Store directly in runtime cache by query_id
-                self._shared_runtime_cache.update(cached_data)
+                self._shared_target_cache.update(cached_data)
 
     def __call__(self, *args, **kwargs):
         """Support decorator usage by returning a wrapped instance when class is instantiated."""
@@ -308,18 +335,28 @@ class CachedExecutionMetricWrapper:
         except Exception as e:
             metrics_logger.error(f"Error saving cache to {cache_path}: {e}")
 
+    @staticmethod
+    def flush_runtime_prediction_cache():
+        """Clear the shared runtime prediction cache."""
+        CachedExecutionMetricWrapper._shared_runtime_prediction_cache.clear()
+        log_with_emoji(
+            metrics_logger,
+            logging.INFO,
+            "Flushed shared runtime prediction cache",
+            "broom"
+        )
+
     def compute_many(self, target_queries: List[DBQuery], predicted_queries: List[DBQuery]) -> Tuple[List[float], List[str]]:
         """Compute metric with full caching support."""
 
         # Find which queries are missing from cache
         missing_queries = []
-        cached_results = {}
-
+        cached_results = {} # 
         for query in target_queries:
             query_id = str(query.query_id)
-            if query_id in self._shared_runtime_cache:
+            if query_id in self._shared_target_cache:
                 # Already cached
-                cached_results[query_id] = self._shared_runtime_cache[query_id]
+                cached_results[query_id] = self._shared_target_cache[query_id]
             else:
                 # Need to execute
                 missing_queries.append(query)
@@ -335,11 +372,11 @@ class CachedExecutionMetricWrapper:
             new_results = self.metric._execute_targets(missing_queries)
 
             # Store in shared cache by query_id
-            self._shared_runtime_cache.update(new_results)
+            self._shared_target_cache.update(new_results)
 
             # Save to file if configured
             if self.cache_file_path:
-                self._save_file_cache(self.cache_file_path, self._shared_runtime_cache)
+                self._save_file_cache(self.cache_file_path, self._shared_target_cache)
 
             # Merge for this computation
             target_results = {**cached_results, **new_results}
@@ -353,8 +390,44 @@ class CachedExecutionMetricWrapper:
                 "high_voltage"
             )
 
-        # Execute predictions (never cached)
-        prediction_results = self.metric._execute_predictions(predicted_queries)
+        # ------------------------------------------------
+        # Now handle predictions with runtime-only cache
+        
+        missing_prediction_queries = []
+        cached_prediction_results = {}
+        for query in predicted_queries:
+            query_id = str(query.query_id)
+            if query_id in self._shared_runtime_prediction_cache:
+                # Already cached
+                cached_prediction_results[query_id] = self._shared_runtime_prediction_cache[query_id]
+            else:
+                # Need to execute
+                missing_prediction_queries.append(query)
 
-        # Delegate to metric for scoring
-        return self.metric.compute_many(target_results, prediction_results)
+        if missing_prediction_queries:
+            # Execute only missing prediction queries
+            log_with_emoji(
+                metrics_logger,
+                logging.INFO,
+                f"Executing {len(missing_prediction_queries)} missing prediction queries (cached: {len(cached_prediction_results)})",
+                "rocket"
+            )
+            new_prediction_results = self.metric._execute_predictions(missing_prediction_queries)
+
+            # Store in shared runtime cache
+            self._shared_runtime_prediction_cache.update(new_prediction_results)
+
+            # Merge for this computation
+            predicted_results = {**cached_prediction_results, **new_prediction_results}
+        else:
+            # All cached
+            predicted_results = cached_prediction_results
+            log_with_emoji(
+                metrics_logger,
+                logging.INFO,
+                f"Full cache hit - using {len(predicted_results)} cached prediction results",
+                "high_voltage"
+            )
+        
+        # Delegate to metric for scoring (using internal _score_results method)
+        return self.metric._score_results(target_results, predicted_results)
