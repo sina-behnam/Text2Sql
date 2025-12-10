@@ -53,21 +53,41 @@ class TupleOrder(TupleLevelMetrics):
             return 1.0
         if prediction_len != 0 and target_len == 0 or prediction_len == 0 and target_len != 0:
             return 0.0
-        # take only prediction that are in target without duplicates
-        # MAINTAINING the order
+
+        # Convert to tuples for hashability (lists aren't hashable)
+        target_tuples = [tuple(row) for row in target]
+        pred_tuples = [tuple(row) for row in prediction]
+
+        # Create sets for O(1) membership lookup
+        target_set = set(target_tuples)
+        pred_set = set(pred_tuples)
+
+        # Take only predictions that are in target without duplicates
+        # MAINTAINING the order (same logic, O(1) lookups)
         new_pred = []
-        [new_pred.append(pred) for pred in prediction
-         if pred in target and pred not in new_pred]
-        # same for target
+        seen_pred = set()
+        for pred in pred_tuples:
+            if pred in target_set and pred not in seen_pred:
+                new_pred.append(pred)
+                seen_pred.add(pred)
+
+        # Same for target
         new_target = []
-        [new_target.append(tar) for tar in target
-         if tar in prediction and tar not in new_target]
+        seen_target = set()
+        for tar in target_tuples:
+            if tar in pred_set and tar not in seen_target:
+                new_target.append(tar)
+                seen_target.add(tar)
+
         if len(new_target) == 0:
             # case when prediction does not have any element in target
             rho = 0.0
         else:
-            target_ranks = [i for i in range(len(new_target))]
-            pred_ranks = [new_target.index(row) for row in new_pred]
+            # Build index lookup dict for O(1) instead of .index() O(n)
+            target_index_map = {item: idx for idx, item in enumerate(new_target)}
+
+            target_ranks = list(range(len(new_target)))
+            pred_ranks = [target_index_map[row] for row in new_pred]
             diff_rank_squared = [(tar - pred) ** 2
                                  for tar, pred in zip(target_ranks, pred_ranks)]
             sum_diff_rank_squared = sum(diff_rank_squared)
