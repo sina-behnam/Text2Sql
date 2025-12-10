@@ -23,7 +23,7 @@ class Metric(ABC):
         return cls.name
     
     @classmethod
-    def find_by_id(self, target: List[DBQuery], id: str) -> Any:
+    def find_by_id(self, target: List[DBQuery], id: str) -> Optional[DBQuery]:
         """Find an instance by its ID.
 
         Args:

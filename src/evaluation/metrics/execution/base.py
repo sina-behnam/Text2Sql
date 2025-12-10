@@ -6,12 +6,12 @@ from src.typing.query import DBQuery, TargetPredictedDBQuery
 from src.typing.result import ExecutionResult
 import json
 from pathlib import Path
-from utils.loggers.metrics_logger import MetricsLogger, log_with_emoji
+from src.utils.loggers.metrics_logger import MetricsLogger, log_with_emoji
 import logging
 
 # Get logger instance
 metrics_logger = MetricsLogger.get_instance().get_metrics_logger(
-    log_file='logs/metrics_evaluation.log',
+    log_file='metrics_evaluation.log',
     level=logging.INFO
 )
 
@@ -166,6 +166,14 @@ class ExecutionBasedMetric(Metric):
             - scores: List of metric values
             - skipped_ids: List of query IDs that were skipped
         """
+        # log what metric is running
+        log_with_emoji(
+            metrics_logger,
+            logging.INFO,
+            f"Metric {self.get_name().value} is computing now !",
+            "gear"
+        )
+
         # Execute targets and predictions
         target_results = self._execute_targets(target_queries)
         prediction_results = self._execute_predictions(predicted_queries)
