@@ -11,19 +11,16 @@ class QuerySyntaxBasedEvaluator:
     Evaluator for SQL query syntax based on normalization.
     """
 
-    def __init__(self, target: DBQuery, prediction: DBQuery):
-        self.target = target.query
-        self.prediction = prediction.query
-        self.db = target.db_path
-        self.schema = extract_sqlite_schema(self.db) # Although this may not be used in syntax evaluation, and more relevant for semantic evaluation.
+    def __call__(self, target: DBQuery, prediction: DBQuery) -> dict:
+        return self.evaluate(target.query, prediction.query)
 
-    def evaluate(self) -> dict:
+    def evaluate(self, target: str, prediction: str) -> dict:
         return {
-            "exact_match": self.exact_match(self.target, self.prediction),
-            "components_match": self.components_match(self.target, self.prediction),
-            "token_precision": self.token_precision(self.target, self.prediction),
-            "token_recall": self.token_recall(self.target, self.prediction),
-            "token_f1": self.token_f1(self.target, self.prediction)
+            "exact_match": self.exact_match(target, prediction),
+            "components_match": self.components_match(target, prediction),
+            "token_precision": self.token_precision(target, prediction),
+            "token_recall": self.token_recall(target, prediction),
+            "token_f1": self.token_f1(target, prediction)
         }
 
     @staticmethod
@@ -146,7 +143,7 @@ class QuerySyntaxBasedEvaluator:
         return recall
     
     @staticmethod
-    def token_f1_match(target_sql: str, prediction_sql: str) -> float:
+    def token_f1(target_sql: str, prediction_sql: str) -> float:
         """
         Token-level F1 between canonicalized target and prediction.
 

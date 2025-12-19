@@ -41,6 +41,9 @@ def _handle_empty_results(target_rows, prediction_rows):
 
 
 class ResultBasedEvaluator:
+
+    def __call__(self, target : ExecutionResult, prediction : ExecutionResult) -> dict:
+        return self.evaluate(target,prediction)
     
     def evaluate(self, target: ExecutionResult, prediction: ExecutionResult) -> dict:
         return {
