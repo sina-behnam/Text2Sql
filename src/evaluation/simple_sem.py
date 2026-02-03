@@ -1,9 +1,11 @@
-from sqlglot import Parser, exp, parse_one
+from sqlglot import exp, parse_one
 from collections import Counter
 import numpy as np
 # Parsing errors
 import sqlglot
 from src.typing.query import DBQuery
+
+from zss import simple_distance, Node
 
 # ============== NODE TYPE MAPPING ==============
 NODE_TYPES = {
@@ -86,7 +88,36 @@ class SemnticalBasedEvaluator:
         if vocab is None:
             vocab = self.build_vocabulary([target, prediction])
 
-        return self.compare_queries(target, prediction, vocabulary=vocab, method=method)
+        comp = self.compare_queries(target, prediction, vocabulary=vocab, method=method)
+        tree_dist = self.ZSS.tree_distance(target, prediction)
+        comp['tree_distance'] = tree_dist
+        return comp
+
+    # ============ ZSS TREE DISTANCE ==============
+    class ZSS:
+
+        @staticmethod
+        def _ast_to_zss(node):
+            """Convert sqlglot AST to zss Node."""
+            label = type(node).__name__
+            children = []
+            for child in node.args.values():
+                if isinstance(child, exp.Expression):
+                    children.append(SemnticalBasedEvaluator.ZSS._ast_to_zss(child))
+                elif isinstance(child, list):
+                    children.extend(SemnticalBasedEvaluator.ZSS._ast_to_zss(c) for c in child if isinstance(c, exp.Expression))
+            return Node(label, children)
+
+        @staticmethod
+        def tree_distance(sql1, sql2):
+            try: 
+                t1 = SemnticalBasedEvaluator.ZSS._ast_to_zss(parse_one(sql1))
+                t2 = SemnticalBasedEvaluator.ZSS._ast_to_zss(parse_one(sql2))
+            except sqlglot.errors.ParseError:
+                return None
+            except sqlglot.errors.TokenError:
+                return None
+            return simple_distance(t1, t2)
 
     # ============== STRUCTURE ENCODER ==============
     @staticmethod
