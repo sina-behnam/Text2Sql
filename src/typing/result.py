@@ -11,6 +11,41 @@ class ExecutionResult:
     success: bool
     error: str = ""
 
+
+@dataclass
+class CachedExecutionResult:
+    """ExecutionResult without query_id for caching in MongoDB."""
+    results: List[Tuple]
+    exec_time_ms: float
+    success: bool
+    error: str = ""
+
+    @classmethod
+    def from_execution_result(cls, er: 'ExecutionResult') -> 'CachedExecutionResult':
+        return cls(
+            results=er.results,
+            exec_time_ms=er.exec_time_ms,
+            success=er.success,
+            error=er.error
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            'results': [list(t) for t in self.results],  # Convert tuples to lists for MongoDB
+            'exec_time_ms': self.exec_time_ms,
+            'success': self.success,
+            'error': self.error
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'CachedExecutionResult':
+        return cls(
+            results=[tuple(r) for r in data.get('results', [])],
+            exec_time_ms=data.get('exec_time_ms', 0),
+            success=data.get('success', False),
+            error=data.get('error', '')
+        )
+
 @dataclass
 class CellResult:
     query_id: str
