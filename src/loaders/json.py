@@ -10,7 +10,8 @@ class JSONFileDataLoader(BaseLoader):
     def _conversion_format(self, data: Dict[str, Any]) -> Dict[int, Any]:
         converted_data = {}
         for key, value in data.items():
-            converted_data[int(key)] = {'text': value['text']}
+            # converted_data[int(key)] = {'text': value['text']}
+            converted_data[int(key)] = value['text']
         return converted_data
 
     def load_data(self, model, dataset, 

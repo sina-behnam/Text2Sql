@@ -74,30 +74,34 @@ class MetricsLogger:
     def get_metrics_logger(
         self,
         log_file: Optional[str] = None,
-        level: int = logging.INFO
+        level: int = logging.INFO,
+        console_output: bool = False
     ) -> logging.Logger:
         """Get the metrics evaluation logger."""
-        
+
         if 'metrics' not in self._loggers:
             self._loggers['metrics'] = self._create_logger(
                 name='metrics_evaluation',
                 log_file=log_file,
-                level=level
+                level=level,
+                console_output=console_output
             )
         return self._loggers['metrics']
 
     def get_execution_logger(
         self,
         log_file: Optional[str] = None,
-        level: int = logging.INFO
+        level: int = logging.INFO,
+        console_output: bool = False
     ) -> logging.Logger:
         """Get the execution logger."""
-        
+
         if 'execution' not in self._loggers:
             self._loggers['execution'] = self._create_logger(
                 name='query_execution',
                 log_file=log_file,
-                level=level
+                level=level,
+                console_output=console_output
             )
         return self._loggers['execution']
 
@@ -109,7 +113,3 @@ def log_with_emoji(logger: logging.Logger, level: int, message: str, emoji_name:
         emoji_char = emoji.emojize(f":{emoji_name}:", language='alias')
         message = f"{emoji_char} {message}"
     logger.log(level, message)
-
-
-# Singleton instance
-_metrics_logger = MetricsLogger.get_instance().get_metrics_logger()

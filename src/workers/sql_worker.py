@@ -137,10 +137,10 @@ class SQLWorker:
         self.timeout = timeout
         self.max_try_timeout = max_try_timeout
 
-    def execute_single(self, db_url: str, query_id: str, sql: str) -> ExecutionResult:
+    def execute_single(self, query : DBQuery) -> ExecutionResult:
         """Execute a single query (no parallelization)."""
         return _execute_single_query_worker(
-            db_url, query_id, sql,
+            query.db_path, query.query_id, query.query,
             self.runs_per_query, self.timeout, self.max_try_timeout
         )
 
@@ -148,7 +148,7 @@ class SQLWorker:
         """Execute multiple queries sequentially on one database."""
         return [self.execute_single(db_url, query.query_id, query.query) for query in queries]
     
-    def execute_db_parallel(self, db_url: str, queries: List[DBQuery]) -> List[ExecutionResult]:
+    def execute_db_parallel(self, db_url: str, queries: List[DBQuery], do_tqdm: bool = True) -> List[ExecutionResult]:
         """
         Execute multiple queries in parallel on one database.
         
@@ -169,12 +169,12 @@ class SQLWorker:
                 for query in queries
             }
 
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Executing"):
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Executing") if do_tqdm else as_completed(futures):
                 results.append(future.result())
 
         return results
 
-    def execute_parallel(self, queries: List[DBQuery]) -> List[ExecutionResult]:
+    def execute_parallel(self, queries: List[DBQuery], do_tqdm: bool = True) -> List[ExecutionResult]:
         """
         Execute queries in parallel, preserving input order (handles duplicate query_ids).
         """
@@ -190,7 +190,7 @@ class SQLWorker:
                 for idx, query in enumerate(queries)
             }
 
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Executing"):
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Executing") if do_tqdm else as_completed(futures):
                 idx = futures[future]
                 try:
                     results[idx] = future.result()
