@@ -1,19 +1,14 @@
 import json
-import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
 import pandas as pd
-import torch
 from torch.utils.data import Dataset, DataLoader
-
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from loguru import logger
+import sys
+# Configure logging that only log the info not debug messages
+logger.remove()
+logger.add(sys.stderr, level="INFO")
 
 @dataclass
 class DatasetInstance:
